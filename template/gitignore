@@ -1,0 +1,8 @@
+# Obsidian volatile UI state
+.obsidian/workspace.json
+
+# OS
+.DS_Store
+
+# A5N run logs
+.a5n-logs/

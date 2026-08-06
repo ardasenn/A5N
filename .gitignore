@@ -1,0 +1,8 @@
+# Your own configuration. The example is tracked, yours is not.
+config.ini
+
+# OS
+.DS_Store
+
+__pycache__/
+*.pyc
