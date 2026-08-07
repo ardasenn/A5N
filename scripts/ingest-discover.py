@@ -252,24 +252,30 @@ def capture(cfg, dry):
         dup_note = None
         if fl is not None and fl in index_of(name):
             rels = [(relation(src, ex), ex) for ex in index_of(name)[fl]]
+            # The OTHER file's name is truncated to 8 chars on purpose. A
+            # full filename in a log line would put that session's complete
+            # id into the namespace, and "id appears in the namespace" is
+            # the processed test: the kept session would silently drop out
+            # of the queue before its page was ever written. Caught by a
+            # smoke test on 2026-08-07.
+            other = os.path.basename(rels[0][1])[:8] + "…"
             if any(r == "subset" for r, _ in rels):
                 counts["redundant"] += 1
-                kept = os.path.basename(rels[0][1])
                 append_skip(vault, name,
-                            f"skip | {sid} contained in {kept}, raw not copied",
+                            f"skip | {sid} contained in {other}, raw not copied",
                             dry)
                 ns_cache.pop(name, None)
                 continue
             if any(r == "superset" for r, _ in rels):
                 counts["larger"] += 1
                 dup_note = (f"note | {sid} is a LARGER copy of the same "
-                            f"conversation ({os.path.basename(rels[0][1])} "
-                            f"kept, pruning is the user's call)")
+                            f"conversation ({other} kept, pruning is the "
+                            f"user's call)")
             else:
                 counts["divergent"] += 1
                 dup_note = (f"note | {sid} shares its first line with "
-                            f"{os.path.basename(rels[0][1])} but the content "
-                            f"forks, both kept, check them")
+                            f"{other} but the content forks, both kept, "
+                            f"check them")
 
         if dry:
             print(f"[dry-run] would copy: {name}/{sid} "
