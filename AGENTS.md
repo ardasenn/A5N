@@ -9,9 +9,10 @@ project names.
 ```
 config.example.ini   every setting, copied to config.ini by the user
 scripts/config.py    the only place that reads config.ini
-scripts/*.sh         the unattended runs
+scripts/*.sh         the unattended run drivers (deterministic orchestration)
+scripts/ingest-*.py  discovery and capture, queue, artifact verification
 scripts/*.py         transcript handling and mechanical lint
-scripts/prompts/     what the headless agent is told, English only
+scripts/prompts/     what one headless worker is told, English only
 template/            copied into a new vault by setup.sh
 example/             invented sample output, referenced from the README
 ```

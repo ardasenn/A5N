@@ -1,16 +1,27 @@
 #!/bin/zsh
-# A5N weekly lint. Two layers:
+# A5N weekly lint driver. Same two layer pattern as daily-ingest.sh: the
+# result signature contract is gone, replaced by PER PROJECT independent
+# workers, mechanical artifact verification and per unit commits. A failing
+# project cannot take the other projects' reports down with it, and a
+# verification rejection feeds its reasons into a second attempt.
 #
-#   1. Mechanical, deterministic. fix-links.py repairs wrong path links, which
-#      is the only automatic edit in the whole system. lint-mech.py scans for
-#      dead links and orphan pages and writes a report.
-#   2. Semantic, run by the headless agent. Contradictions, missing cross
-#      references, concepts without a page, schema drift in frontmatter.
-#      Reported only, never auto fixed: deciding what to change is yours.
+# Flow:
+#   1. fix-links.py   repairs wrong path links (deterministic, the only
+#                     automatic edit in the whole system)
+#   2. lint-mech.py   dead link and orphan scan (.a5n-logs/lint-mech/)
+#      -> mechanical changes get their own commit
+#   3. one claude -p semantic lint worker per project (no subagents,
+#      report only)
+#      -> verification: the changed paths are EXACTLY <project>/lint-report.md
+#         and <project>/log.md, and the report must have changed. A passing
+#         project is committed immediately.
 #
-# Same proven shape as daily-ingest.sh: lock, stale lock recovery, watchdog,
-# signature contract, notification and rollback on failure. Both scripts share
-# one lock file so they can never overlap.
+# The lint shares ONE lock file with the ingest, so they can never overlap.
+# If the ingest is still running, the lint notifies and leaves.
+#
+# Testing: point A5N_CONFIG at a scratch config, and use A5N_LINT_PROJECTS
+# ("acme-shop other" narrows the project list) / A5N_UNIT_TIMEOUT /
+# A5N_NO_NOTIFY.
 set -u
 
 SCRIPT_DIR="${0:A:h}"
@@ -26,7 +37,7 @@ VAULT="$A5N_VAULT"
 LOGDIR="$VAULT/.a5n-logs"
 MECHDIR="$LOGDIR/lint-mech"
 PROMPT_FILE="${A5N_LINT_PROMPT_FILE:-$REPO/scripts/prompts/weekly-lint.md}"
-RUN_TIMEOUT="$A5N_RUN_TIMEOUT"
+UNIT_TIMEOUT="${A5N_UNIT_TIMEOUT:-1800}"
 
 mkdir -p "$LOGDIR" "$MECHDIR"
 LOG="$LOGDIR/lint-$(date +%F).log"
@@ -34,22 +45,19 @@ LOCK="$LOGDIR/.lock"
 OUT="$LOGDIR/.last-lint-stdout"
 WATCHDOG_FLAG="$LOGDIR/.lint-watchdog-fired"
 
-log() {
-  echo "[$(date '+%F %T')] $*" >> "$LOG"
-}
+log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 
 notify_fail() {
   log "FAILED: $1"
   [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
   if [ "$(uname)" = "Darwin" ]; then
-    /usr/bin/osascript -e "display notification \"$1\" with title \"A5N lint failed\"" >/dev/null 2>&1
+    /usr/bin/osascript -e "display notification \"$1\" with title \"A5N lint\"" >/dev/null 2>&1
   fi
 }
 
-rollback_agent_work() {
+rollback_unit() {
   git reset --hard --quiet >> "$LOG" 2>&1
   git clean -fd --quiet >> "$LOG" 2>&1
-  log "agent leftovers reverted (reset --hard + clean -fd)"
 }
 
 if [ ! -d "$VAULT/.git" ]; then
@@ -58,18 +66,19 @@ if [ ! -d "$VAULT/.git" ]; then
   exit 1
 fi
 
+# The lock is SHARED with daily-ingest. In a healthy run it is refreshed
+# after every unit, so a lock older than two hours is dead.
 if [ -e "$LOCK" ]; then
   LOCK_MTIME="$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null)"
   LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
   if [ "$LOCK_AGE" -gt 7200 ]; then
-    log "WARNING: stale lock found (${LOCK_AGE}s), removing and continuing"
+    log "WARNING: stale lock (${LOCK_AGE}s), removing and continuing"
     rm -f "$LOCK"
   else
-    log "lock held (${LOCK_AGE}s), run skipped"
+    notify_fail "lock held (${LOCK_AGE}s, probably the ingest is running), lint skipped; by hand: scripts/weekly-lint.sh"
     exit 0
   fi
 fi
-
 cleanup() {
   rm -f "$LOCK"
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
@@ -80,71 +89,158 @@ touch "$LOCK"
 
 cd "$VAULT" || exit 1
 
-PROMPT="$(cat "$PROMPT_FILE" 2>/dev/null)"
-if [ ! -s "$PROMPT_FILE" ] || [ -z "$PROMPT" ]; then
+if [ ! -s "$PROMPT_FILE" ]; then
   notify_fail "lint prompt missing or empty ($PROMPT_FILE), run cancelled"
   exit 1
 fi
 
+# Hand written edits should not be mixed into lint commits.
 if [ -n "$(git status --porcelain)" ]; then
   log "WARNING: vault dirty before lint, committing manual edits separately"
   git add -A >> "$LOG" 2>&1
   git commit -m "chore: manual vault changes (pre-lint $(date +%F))" >> "$LOG" 2>&1
 fi
 
-log "mechanical layer started"
-python3 "$SCRIPT_DIR/fix-links.py" >> "$LOG" 2>&1
-python3 "$SCRIPT_DIR/lint-mech.py" "$MECHDIR" >> "$LOG" 2>&1
-
-log "semantic layer started (wall clock ${RUN_TIMEOUT}s)"
-rm -f "$WATCHDOG_FLAG"
-
-CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$A5N_CLAUDE_BIN" -p "$PROMPT" \
-  --model "$A5N_MODEL" \
-  --permission-mode acceptEdits \
-  --max-turns 200 \
-  > "$OUT" 2>&1 &
-AGENT_PID=$!
-
-(
-  sleep "$RUN_TIMEOUT"
-  kill -TERM "$AGENT_PID" 2>/dev/null || exit 0
-  touch "$WATCHDOG_FLAG"
-  sleep 30
-  kill -KILL "$AGENT_PID" 2>/dev/null
-) &
-WATCHDOG_PID=$!
-
-wait "$AGENT_PID"
-AGENT_EXIT=$?
-kill "$WATCHDOG_PID" 2>/dev/null
-cat "$OUT" >> "$LOG"
-log "agent exit=$AGENT_EXIT"
-
-if [ "$AGENT_EXIT" -ne 0 ]; then
-  if [ -e "$WATCHDOG_FLAG" ]; then
-    notify_fail "wall clock of ${RUN_TIMEOUT}s reached, lint cut short, work reverted"
-  else
-    notify_fail "agent exit=$AGENT_EXIT, skipping commit"
-  fi
-  rollback_agent_work
+# --- 1+2. Mechanical layer (deterministic) ----------------------------------
+log "fix-links started"
+FIX_OUT="$(python3 "$SCRIPT_DIR/fix-links.py" 2>>"$LOG")"
+FIX_RC=$?
+echo "$FIX_OUT" >> "$LOG"
+if [ "$FIX_RC" -ne 0 ]; then
+  notify_fail "fix-links.py failed (rc=$FIX_RC), lint cancelled, leftovers reverted"
+  rollback_unit
   exit 1
 fi
+echo "$FIX_OUT" | head -1 > "$MECHDIR/last-fix-count.txt"
 
-SIGNATURE="$(grep -a '^LINT_RESULT:' "$OUT" | tail -1)"
-if [ -z "$SIGNATURE" ]; then
-  notify_fail "no LINT_RESULT signature, the agent did not run. Output: $(tail -c 200 "$OUT")"
-  rollback_agent_work
+log "lint-mech started"
+if ! python3 "$SCRIPT_DIR/lint-mech.py" "$MECHDIR" >> "$LOG" 2>&1; then
+  notify_fail "lint-mech.py failed, lint cancelled, leftovers reverted"
+  rollback_unit
   exit 1
 fi
-log "$SIGNATURE"
 
 if [ -n "$(git status --porcelain)" ]; then
   git add -A >> "$LOG" 2>&1
-  git commit -m "chore: weekly lint $(date +%F)" >> "$LOG" 2>&1
-  log "committed"
-else
-  log "nothing changed, no commit"
+  git commit -m "chore: lint mechanical link repairs $(date +%F)" >> "$LOG" 2>&1
+  log "mechanical repairs committed"
 fi
 
-log "done"
+# --- 3. Semantic lint: one worker per project -------------------------------
+# The namespace list is dynamic: every vault root directory holding a
+# sources/ folder. A namespace dropped from config.ini still gets linted as
+# long as its pages exist.
+PROJECTS="${A5N_LINT_PROJECTS:-}"
+if [ -z "$PROJECTS" ]; then
+  PROJECTS="$(for d in */; do [ -d "${d}sources" ] && echo "${d%/}"; done)"
+fi
+
+TODAY="$(date +%F)"
+OK=0; FAIL=0; CONSEC_ERR=0
+for PROJ in ${=PROJECTS}; do
+  log "lint unit started: $PROJ"
+  PROMPT="$(python3 - "$PROMPT_FILE" "$PROJ" "$TODAY" "$A5N_LANGUAGE" <<'PYEOF'
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+for k, v in zip(("__PROJECT__", "__DATE__", "__LANGUAGE__"), sys.argv[2:5]):
+    t = t.replace(k, v)
+sys.stdout.write(t)
+PYEOF
+)"
+
+  UNIT_DONE=""; VREASON=""
+  for ATTEMPT in 1 2; do
+    FULL_PROMPT="$PROMPT"
+    if [ "$ATTEMPT" -eq 2 ]; then
+      FULL_PROMPT="$PROMPT
+
+YOUR PREVIOUS ATTEMPT WAS REJECTED BY VERIFICATION AND ROLLED BACK. The
+rejection reasons:
+$VREASON
+
+Fix these. Only $PROJ/lint-report.md and $PROJ/log.md may change, and the
+report file must have been written."
+      log "attempt 2 (rejection reasons added to the prompt): $PROJ"
+    fi
+
+    rm -f "$WATCHDOG_FLAG"
+    "$A5N_CLAUDE_BIN" -p "$FULL_PROMPT" \
+      --model "$A5N_MODEL" \
+      --permission-mode acceptEdits \
+      --max-turns 80 \
+      --disallowedTools "Agent" "Task" "ScheduleWakeup" "Workflow" "Bash(git commit:*)" "Bash(git push:*)" \
+      > "$OUT" 2>&1 < /dev/null &
+    AGENT_PID=$!
+    (
+      sleep "$UNIT_TIMEOUT"
+      kill -TERM "$AGENT_PID" 2>/dev/null || exit 0
+      touch "$WATCHDOG_FLAG"
+      sleep 30
+      kill -KILL "$AGENT_PID" 2>/dev/null
+    ) &
+    WATCHDOG_PID=$!
+    wait "$AGENT_PID"; AGENT_EXIT=$?
+    kill "$WATCHDOG_PID" 2>/dev/null; WATCHDOG_PID=""
+    cat "$OUT" >> "$LOG"
+
+    if [ "$AGENT_EXIT" -ne 0 ]; then
+      if [ -e "$WATCHDOG_FLAG" ]; then
+        log "unit cut at the ${UNIT_TIMEOUT}s ceiling: $PROJ, rolled back"
+      else
+        log "agent exit=$AGENT_EXIT: $PROJ, rolled back"
+        CONSEC_ERR=$((CONSEC_ERR+1))
+      fi
+      rollback_unit
+      break
+    fi
+    CONSEC_ERR=0
+
+    # Artifact verification, mechanical: the changed paths may ONLY be this
+    # project's lint-report.md and log.md, and the report MUST have changed.
+    # "Report only" is no longer a prompt request but a guarantee.
+    VREASON=""
+    DIRT="$(git status --porcelain | sed -E 's/^.{3}//; s/^"|"$//g; s/.* -> //')"
+    if [ -z "$DIRT" ]; then
+      VREASON="tree is clean, the worker wrote no report"
+    else
+      while IFS= read -r P; do
+        case "$P" in
+          "$PROJ/lint-report.md"|"$PROJ/log.md") ;;
+          *) VREASON="$VREASON path not allowed: $P;" ;;
+        esac
+      done <<< "$DIRT"
+      echo "$DIRT" | grep -qx "$PROJ/lint-report.md" || \
+        VREASON="$VREASON $PROJ/lint-report.md unchanged (no report);"
+    fi
+
+    if [ -z "$VREASON" ]; then
+      git add -A >> "$LOG" 2>&1
+      if git commit -m "chore: lint($PROJ) $TODAY" >> "$LOG" 2>&1; then
+        UNIT_DONE=1; log "lint unit done and committed: $PROJ (attempt $ATTEMPT)"
+      else
+        notify_fail "git commit failed (lint $PROJ), run stopped, look by hand"
+        exit 1
+      fi
+      break
+    fi
+    log "verification REJECTED (attempt $ATTEMPT): $PROJ, $VREASON"
+    rollback_unit
+  done
+
+  if [ -n "$UNIT_DONE" ]; then
+    OK=$((OK+1))
+  else
+    FAIL=$((FAIL+1))
+    if [ "$CONSEC_ERR" -ge 2 ]; then
+      notify_fail "agent failed $CONSEC_ERR times in a row (API or auth?), lint stopped"
+      break
+    fi
+  fi
+  touch "$LOCK"
+done
+
+log "lint finished: $OK done, $FAIL failed"
+if [ "$FAIL" -gt 0 ]; then
+  notify_fail "lint: $FAIL projects unreported ($OK done), they retry next week"
+fi
+exit 0

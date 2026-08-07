@@ -163,47 +163,69 @@ weekly lint reports them all.
 
 kebab-case filenames. `sources/sessions/YYYY-MM-DD-<slug>.md`.
 
-## INGEST workflow
+## INGEST workflow, two layers
 
-When a new source lands in `<project>/raw/sessions/` or `<project>/raw/docs/`:
+Daily and unattended: `scripts/daily-ingest.sh`. The principle: ORCHESTRATION
+IS DETERMINISTIC SCRIPT, THE MODEL ONLY WORKS AT THE LEAF ("read and write");
+success is measured by the ARTIFACT, never by a claim; units are committed
+independently. (The previous design, one model run doing discovery, copying,
+pages and a result signature with a wholesale rollback on failure, produced a
+new choreography failure every week and once deleted a finished day's work.)
 
-0. For an agent session, first copy the JSONL into `<project>/raw/sessions/`
-   through the import script. Never a symlink: agents delete old transcripts
-   after a while, Claude Code after `cleanupPeriodDays` which defaults to
-   about thirty days, and the vault keeps its own permanent copy. The
-   `source:` frontmatter of every page points at this in vault path.
+**Layer 1, capture (pure script, no LLM).** `ingest-discover.py capture`
+scans both transcript sources from `config.ini` (the single authority for
+discovery), applies the watermark, freshness, size and duplicate content
+filters, and copies survivors through the `import-transcript.py` filter into
+`<project>/raw/sessions/`. Never a symlink: agents delete old transcripts
+after a while, Claude Code after `cleanupPeriodDays` which defaults to about
+thirty days, and the vault keeps its own permanent copy. This is the only
+time critical work. The `source:` frontmatter of every page points at this in
+vault path.
 
-   Two agent formats are supported and the script detects which is which from
-   the first line:
-   * **Claude Code**, `<claude_projects>/<folder>/<uuid>.jsonl`, target name
-     `<uuid>.jsonl`
-   * **Codex**, `<codex_sessions>/YYYY/MM/DD/rollout-*.jsonl`, target name
-     `codex-<session_id>.jsonl`
+Two agent formats are supported and detected from the first line:
+* **Claude Code**, `<claude_projects>/<folder>/<uuid>.jsonl`, target name
+  `<uuid>.jsonl`, matched by folder name. The filter drops
+  `attachment/hook_success`, roughly 64 percent of the file and zero
+  information, the same data is already there as `tool_result`/`tool_use`.
+* **Codex**, `<codex_sessions>/YYYY/MM/DD/rollout-*.jsonl`, target name
+  `codex-<session_id>.jsonl`, matched by the session's own working
+  directory. The filter drops only `event_msg/token_count` telemetry.
 
-   ```
-   python3 scripts/import-transcript.py <source.jsonl> <project>/raw/sessions/<target>.jsonl
-   ```
+Duplicates are judged by CONTENT, not filename (the first surviving line):
+candidate contained in an existing raw, not copied; candidate larger, copied
+under its new id and the old file kept. Small and duplicate drops get a
+DETERMINISTIC skip line in `<project>/log.md`, "never skip in silence" is a
+script guarantee now. The result is one commit: `chore: raw capture`.
 
-   Plain `cp` is not used. Filtering differs by format and both drop only
-   records that carry ZERO information:
-   * Claude Code: `attachment/hook_success`, roughly 64 percent of the file.
-     A continuous learning hook writes its own payload back to stdout, so
-     every tool result is stored a second time. Conversation, `tool_result`,
-     `tool_use`, `thinking` and images are all preserved.
-   * Codex: `event_msg/token_count`, token counters only, no conversation
-     content, roughly 1.4 percent. There is no hook echo in Codex so the
-     saving is small. The point of this step is permanence, not compression.
+State is not kept in a separate file, THE VAULT ITSELF IS THE STATE:
+- captured = `<project>/raw/sessions/<id>.jsonl` exists
+- processed = the id appears in some .md outside raw/ in the namespace (a
+  source page or a log.md skip line). A raw with no trace is queued.
 
-   Check for duplicates BEFORE copying: if a candidate's first line matches an
-   existing file's first line, they are the same conversation, and if the
-   candidate is fully contained in the existing file it is not copied. The
-   test is content, not filename. The id in a filename and the `sessionId`
-   inside the file do not always agree.
-1. Read the source and pull out the main subject.
-2. Write `<project>/sources/sessions/YYYY-MM-DD-<slug>.md`: goal, what was
-   done, files changed, decisions, problems, open questions.
+**Layer 2, processing (one model worker per session).** `ingest-discover.py
+queue` lists the unprocessed raws (oldest first, per run cap in config); the
+driver runs a SEPARATE, synchronous headless worker for each one
+(`scripts/prompts/ingest-unit.md`; subagents, scheduling and background work
+disallowed, a wall clock per unit; transcripts above the condense threshold
+are reduced to a skeleton first). When a unit finishes, `ingest-verify.py`
+checks the ARTIFACT mechanically: are the changes on in schema paths, does
+the id trace exist (page or skip line), is the frontmatter complete. Pass:
+the unit is committed IMMEDIATELY (`chore: ingest(<project>) <id>`). Fail:
+only THAT unit is rolled back, it stays queued and retries tomorrow by
+itself. On an empty day the model is never invoked. Silence is success, a
+notification only fires on failure.
+
+**Worker steps** (the unit prompt points here; the same flow applies when
+you are asked by hand to "process this session"):
+
+1. Read the session, pull out the main subject.
+2. Write `<project>/sources/sessions/YYYY-MM-DD-<slug>.md` (date = the
+   session's own date): goal, what was done, files changed, decisions,
+   problems, open questions.
 3. Create or cross update every entity, concept, decision and bug page it
-   mentions, with links in both directions.
+   mentions, with links in both directions; if the session changes the STATE
+   of an existing page (a bug fixed, a decision overturned), update that
+   page too.
 4. Apply the cross project pattern rule above.
 5. Update `<project>/index.md`.
 6. Append `## [YYYY-MM-DD] ingest | <slug>` to `<project>/log.md`.
@@ -223,15 +245,20 @@ When a new source lands in `<project>/raw/sessions/` or `<project>/raw/docs/`:
 
 ## LINT workflow
 
-Weekly and unattended, two layers.
+Weekly and unattended, `scripts/weekly-lint.sh`, two layers.
 
 1. **Mechanical, deterministic.** `scripts/fix-links.py` repairs wrong path
    links automatically, the only automatic edit in the system.
-   `scripts/lint-mech.py` scans for dead links and orphans.
-2. **Semantic, report only.** Contradictions, missing cross references,
-   concepts with no page, frontmatter drift. Written to
-   `<project>/lint-report.md`, one line in `<project>/log.md`. Semantic
-   findings are never auto fixed. You decide what to change.
+   `scripts/lint-mech.py` scans for dead links and orphans. The namespace
+   list is dynamic, every root directory holding a `sources/` folder, so a
+   new project is covered automatically.
+2. **Semantic, report only, one worker per project.** Contradictions,
+   missing cross references, concepts with no page, frontmatter drift, wrong
+   link targets. `<project>/lint-report.md` is overwritten (the old report
+   stays in git history), one line goes to `<project>/log.md`. Verification
+   is mechanical, only those two files may change, so a failing project
+   cannot take the others down. Semantic findings are never auto fixed. You
+   decide what to change.
 
 ## Adding a project
 
@@ -248,8 +275,9 @@ Weekly and unattended, two layers.
 
 ## Hard rules
 
-1. `raw/` is never modified, only read. The single exception is step 0 of the
-   INGEST workflow, which adds new files and never touches existing ones.
+1. `raw/` is never modified, only read. The single exception is the INGEST
+   capture layer, which adds new files and never touches existing ones; a
+   layer 2 worker writing under `raw/` is rejected by verification.
    Filtering drops only zero information records, so raw fidelity holds.
    Adding a new record type to the filter list is a SCHEMA CHANGE: first prove
    the record carries no information, then update that line. Deleting a

@@ -16,10 +16,12 @@ tekrar önerir, çünkü ikiniz de hatırlamıyorsunuz.
 
 ## A5N ne yapar
 
-Her sabah dünkü oturumları bulur, ham transkriptleri kalıcı bir yere kopyalar
-ve bağlantılı bir markdown wiki'ye damıtır: oturum başına bir sayfa, artı
-dokundukları kararlar, bug'lar, entity'ler ve kavramlar için sayfalar. Haftada
-bir de o wiki'yi çelişki, ölü link ve şema sapması açısından denetler.
+Her sabah deterministik bir script dünkü oturumları bulur ve ham
+transkriptleri kalıcı bir yere kopyalar. Sonra oturum başına bir headless ajan
+onu bağlantılı bir markdown wiki'ye damıtır: oturum başına bir sayfa, artı
+dokunduğu kararlar, bug'lar, entity'ler ve kavramlar için sayfalar. Haftada
+bir de aynı mekanizma o wiki'yi çelişki, ölü link ve şema sapması açısından
+denetler.
 
 Çıktı bir git repo'sundaki düz markdown. Obsidian gezinmek için güzel bir yol
 ve tamamen isteğe bağlı. Hiçbir şey senin diskinin dışına çıkmaz.
@@ -89,21 +91,40 @@ zamanlanmış koşu çakışamaz.
 
 ## Neden bozulmuyor
 
-Gözetimsiz görevler, aksi tasarlanmadıkça sessizce başarısız olur. Bu yüzden:
+Gözetimsiz görevler, aksi tasarlanmadıkça sessizce başarısız olur. Mimarinin
+buna cevabı tek ilke: orkestrasyon deterministik script'te, model sadece
+yaprakta çalışır.
 
-- Ajan çıktısını bir imza satırıyla bitirmek zorundadır. İmza yoksa ajan
-  gerçekten çalışmamıştır, koşu başarısız sayılır, commit atılmaz ve bildirim
-  düşer.
-- Vault bir git repo'sudur ve koşu başlamadan önce ağaç her zaman temizdir. Bu
-  noktadan sonraki her kirlilik ajan çıktısıdır, dolayısıyla başarısız koşu
-  `reset --hard` ile geri alınır ve yarım iş asla commit'e ulaşmaz.
-- Kilit dosyası çakışmayı engeller. İki saatten eski kilit ölü sayılır, çünkü
-  çöken bir süreç temizlik trap'ini çalıştıramaz ve ölü kilit sonraki tüm
-  koşuları sessizce yutar.
-- Watchdog, duvar saatini aşan koşuyu keser. Bu bir iş sınırı değil, sadece
-  sonsuza asılmaya karşı bir koruma.
-- Atlama asla sessiz olmaz. İşlenemeyen oturum için proje log'una bir satır
-  düşer.
+- **Keşfe model hiç karışmaz.** Bir Python script'i transkript klasörlerini
+  tarar, adayları eler ve tekilleştirir, geçenleri vault'a kopyalar. Zaman
+  baskısı olan tek iş budur, çünkü ajanlar transkriptleri bir süre sonra
+  siler, ve bu işin hiçbir parçası halüsinasyon göremez.
+- **Oturum başına bir işçi, eseriyle doğrulanır.** Kuyruktaki her oturum kendi
+  headless ajan koşusunu alır. Koşu bitince bir script diske gerçekten ne
+  yazıldığına bakar: değişen yollar şemanın içinde mi, bir sayfa ya da
+  gerekçeli skip satırı oluşmuş mu, frontmatter tam mı. İşçinin kendi sözüne
+  asla güvenilmez. Önceki tasarım çıktıda sonuç imzası grep'liyordu ve imzanın
+  etrafındaki tek bir backtick bir keresinde işlenmiş on iki oturumu geçersiz
+  kıldı.
+- **Birimler bağımsız commit'lenir.** Doğrulamayı geçen birim anında
+  commit'lenir. Kalan birim tek başına geri alınır, kuyrukta kalır ve yarın
+  yeniden denenir; kardeşlerinin işi çoktan güvendedir. Kuyruğun ayrıca bir
+  kayıt dosyasına ihtiyacı yoktur, çünkü vault'un kendisi state'tir:
+  sayfalarda izi olmayan bir ham transkript tanım gereği hâlâ kuyruktadır.
+- **Reddedilen birim bir şans daha alır.** Doğrulamanın red sebepleri prompt'a
+  eklenir ve işçi bir kez daha koşar, böylece sıradan uyum değişkenliği koşu
+  içinde kapanır, kuyruk günlerce aynı birimi çiğnemez.
+- Vault bir git repo'sudur ve işçi başlamadan önce ağaç her zaman temizdir,
+  dolayısıyla geri alma yalnızca o işçinin çıktısına dokunabilir.
+- Kilit dosyası çakışmayı engeller, ingest ile lint aynı kilidi paylaşır. İki
+  saatten eski kilit ölü sayılır, çünkü çöken bir süreç temizlik trap'ini
+  çalıştıramaz ve ölü kilit sonraki tüm koşuları sessizce yutar.
+- Watchdog, birim başına duvar saatini aşan işçiyi keser. Bu bir iş sınırı
+  değil, sadece sonsuza asılmaya karşı bir koruma.
+- Atlama asla sessiz olmaz. Elenen her oturum için proje log'una deterministik
+  bir satır düşer, modelden rica edilmez, script yazar.
+- Yapılacak iş olmayan günde model hiç çağrılmaz. Sessizlik başarıdır,
+  bildirim sadece hatada düşer.
 
 Bunların her biri, eksik olduğu bir versiyonda gerçek bir arıza yaşandığı için
 var.

@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Print transcript metadata, used by the ingest to filter candidates.
+"""Print transcript metadata, used by the ingest to route candidates.
 
-Why this exists as its own script: the ingest runs headless and ad hoc
-`python3 -c ...` is deliberately not on the permission allowlist, since that
-permission is effectively arbitrary code execution. The three facts the filter
-needs (which format, which project, which session) are exposed here through a
-narrow surface instead.
+ingest-discover.py imports `meta()` from here to decide which project a Codex
+session belongs to (by its cwd) and what filename it gets in the vault. The
+command line form exists for inspecting transcripts by hand.
 
 Usage:
     python3 scripts/transcript-meta.py <transcript.jsonl> [...]
@@ -64,7 +62,7 @@ def main():
         try:
             fmt, sid, cwd, target = meta(path)
         except OSError as e:
-            print(f"hata\t\t\t\t{path} ({e})")
+            print(f"error\t\t\t\t{path} ({e})")
             continue
         print(f"{fmt}\t{sid}\t{cwd}\t{target}\t{path}")
     return 0

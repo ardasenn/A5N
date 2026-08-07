@@ -39,7 +39,9 @@ DEFAULTS = {
     "limits": {
         "min_session_kb": "50",
         "settle_hours": "2",
-        "run_timeout": "7000",
+        "unit_timeout": "1800",
+        "max_units": "15",
+        "condense_over_kb": "2048",
     },
 }
 
@@ -142,7 +144,9 @@ def _emit_shell(cfg):
         "A5N_SCHEDULE_LINT": cfg["schedule"]["lint"],
         "A5N_MIN_SESSION_KB": cfg["limits"]["min_session_kb"],
         "A5N_SETTLE_HOURS": cfg["limits"]["settle_hours"],
-        "A5N_RUN_TIMEOUT": cfg["limits"]["run_timeout"],
+        "A5N_UNIT_TIMEOUT": cfg["limits"]["unit_timeout"],
+        "A5N_MAX_UNITS": cfg["limits"]["max_units"],
+        "A5N_CONDENSE_KB": cfg["limits"]["condense_over_kb"],
         "A5N_PROJECT_NAMES": " ".join(p["name"] for p in cfg["_projects"]),
     }
     for key, value in flat.items():

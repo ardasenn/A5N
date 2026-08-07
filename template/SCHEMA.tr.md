@@ -161,45 +161,66 @@ hepsini raporlar.
 
 kebab-case dosya adları. `sources/sessions/YYYY-MM-DD-<slug>.md`.
 
-## INGEST akışı
+## INGEST akışı, iki katman
 
-`<proje>/raw/sessions/` veya `<proje>/raw/docs/` içine yeni kaynak geldiğinde:
+Günlük ve gözetimsiz: `scripts/daily-ingest.sh`. İlke: ORKESTRASYON
+DETERMİNİSTİK SCRIPT'TE, MODEL SADECE YAPRAKTA ÇALIŞIR ("oku ve yaz");
+başarı beyanla değil ESERLE ölçülür; birimler bağımsız commit'lenir. (Önceki
+tasarım, keşif, kopyalama, sayfa ve sonuç imzasını tek model koşusuna verip
+hatada toptan geri alıyordu; her hafta yeni bir koreografi hatası üretti ve
+bir keresinde bitmiş bir günün işini sildi.)
 
-0. Kaynak bir ajan oturumuysa önce JSONL'i import script'i ile
-   `<proje>/raw/sessions/` içine kopyala. Symlink değil: ajanlar eski
-   transkriptleri bir süre sonra siler, Claude Code varsayılan olarak yaklaşık
-   otuz gün sonra, vault kendi kalıcı kopyasını tutar. Sayfaların `source:`
-   frontmatter'ı bu vault içi yolu gösterir.
+**Katman 1, yakalama (saf script, LLM yok).** `ingest-discover.py capture`
+`config.ini`'deki iki transkript kaynağını tarar (keşfin tek otoritesi),
+watermark, tazelik, boyut ve içerik kopyası elemelerini uygular, geçenleri
+`import-transcript.py` süzgeciyle `<proje>/raw/sessions/` içine kopyalar.
+Symlink değil: ajanlar eski transkriptleri bir süre sonra siler, Claude Code
+varsayılan olarak yaklaşık otuz gün sonra, vault kendi kalıcı kopyasını
+tutar. Zaman baskısı olan tek iş budur. Sayfaların `source:` frontmatter'ı bu
+vault içi yolu gösterir.
 
-   İki ajan formatı desteklenir, script ilk satırdan hangisi olduğunu tanır:
-   * **Claude Code**, `<claude_projects>/<klasör>/<uuid>.jsonl`, hedef ad
-     `<uuid>.jsonl`
-   * **Codex**, `<codex_sessions>/YYYY/MM/DD/rollout-*.jsonl`, hedef ad
-     `codex-<session_id>.jsonl`
+İki ajan formatı desteklenir ve ilk satırdan tanınır:
+* **Claude Code**, `<claude_projects>/<klasör>/<uuid>.jsonl`, hedef ad
+  `<uuid>.jsonl`, eşleme klasör adıyla. Süzgeç `attachment/hook_success`
+  kayıtlarını atar, dosyanın yaklaşık yüzde 64'ü ve sıfır bilgi, aynı veri
+  `tool_result`/`tool_use` olarak zaten durur.
+* **Codex**, `<codex_sessions>/YYYY/MM/DD/rollout-*.jsonl`, hedef ad
+  `codex-<session_id>.jsonl`, eşleme oturumun kendi çalışma diziniyle.
+  Süzgeç yalnızca `event_msg/token_count` telemetrisini atar.
 
-   ```
-   python3 scripts/import-transcript.py <kaynak.jsonl> <proje>/raw/sessions/<hedef>.jsonl
-   ```
+Kopya ölçütü dosya adı değil İÇERİKTİR (süzülmüş ilk satır): aday mevcut bir
+raw'ın içindeyse kopyalanmaz; aday daha genişse yeni kimliğiyle kopyalanır,
+eskisi silinmez. Küçük ve kopya elemeleri `<proje>/log.md`'ye DETERMİNİSTİK
+skip satırı düşer, "sessizce atlama yasak" artık script garantisidir. Sonuç
+tek commit: `chore: raw capture`.
 
-   Düz `cp` kullanılmaz. Süzme formata göre değişir, ikisi de yalnızca sıfır
-   bilgi taşıyan kaydı atar:
-   * Claude Code: `attachment/hook_success`, dosyanın yaklaşık yüzde 64'ü. Bir
-     continuous learning hook'u kendi payload'ını stdout'a geri yazdığı için
-     her araç sonucu ikinci kez saklanıyor. Konuşma, `tool_result`,
-     `tool_use`, `thinking` ve görseller aynen korunur.
-   * Codex: `event_msg/token_count`, sadece token sayaçları, konuşma içeriği
-     yok, yaklaşık yüzde 1.4. Codex'te hook yankısı olmadığı için kazanç
-     küçüktür. Bu adımın amacı sıkıştırma değil kalıcılıktır.
+State ayrı dosyada tutulmaz, VAULT'UN KENDİSİ STATE'TİR:
+- yakalandı = `<proje>/raw/sessions/<id>.jsonl` mevcut
+- işlendi = kimlik, namespace'te raw/ dışında bir .md'de geçiyor (kaynak
+  sayfa ya da log.md skip satırı). Raw'ı olup izi olmayan oturum kuyruktadır.
 
-   Kopyalamadan önce kopya kontrolü yap: adayın ilk satırı mevcut bir
-   dosyanınkiyle aynıysa ikisi aynı konuşmadır, aday tamamen mevcudun içindeyse
-   kopyalanmaz. Ölçüt dosya adı değil içeriktir. Dosya adındaki kimlik ile
-   dosyanın içindeki `sessionId` birbirini tutmayabilir.
-1. Kaynağı oku, ana konuyu çıkar.
-2. `<proje>/sources/sessions/YYYY-MM-DD-<slug>.md` yaz: amaç, ne yapıldı,
-   değişen dosyalar, kararlar, sorunlar, açık konular.
+**Katman 2, işleme (oturum başına bir model işçisi).** `ingest-discover.py
+queue` işlenmemişleri listeler (eski önce, koşu başına tavan config'de);
+sürücü her biri için AYRI, senkron headless işçi koşturur
+(`scripts/prompts/ingest-unit.md`; subagent, zamanlama ve arka plan işi
+kapalı, birim başına duvar saati; eşiği aşan transkript önce iskelete
+indirilir). Birim bitince `ingest-verify.py` ESERİ mekanik doğrular:
+değişiklikler şema içi yolda mı, kimlik izi (sayfa ya da skip satırı) var
+mı, frontmatter tam mı. Geçerse birim ANINDA commit'lenir
+(`chore: ingest(<proje>) <id>`); kalırsa SADECE o birim geri alınır,
+kuyrukta kalır, yarın kendiliğinden yeniden denenir. Boş günde model hiç
+çağrılmaz. Sessizlik başarıdır, bildirim sadece hatada.
+
+**İşçi adımları** (birim prompt'u buraya işaret eder; elle "şu oturumu işle"
+dendiğinde de aynı akış geçerlidir):
+
+1. Oturumu oku, ana konuyu çıkar.
+2. `<proje>/sources/sessions/YYYY-MM-DD-<slug>.md` yaz (tarih = oturumun
+   kendi tarihi): amaç, ne yapıldı, değişen dosyalar, kararlar, sorunlar,
+   açık konular.
 3. Bahsedilen her entity, concept, decision ve bug sayfasını oluştur veya
-   çapraz güncelle, çift yönlü link ver.
+   çapraz güncelle, çift yönlü link ver; oturum mevcut bir sayfanın
+   DURUMUNU değiştiriyorsa (bug çözüldü, karar aşıldı) o sayfayı da güncelle.
 4. Yukarıdaki cross project pattern kuralını uygula.
 5. `<proje>/index.md`'yi güncelle.
 6. `<proje>/log.md`'ye `## [YYYY-MM-DD] ingest | <slug>` satırı ekle.
@@ -218,15 +239,20 @@ kebab-case dosya adları. `sources/sessions/YYYY-MM-DD-<slug>.md`.
 
 ## LINT akışı
 
-Haftalık ve gözetimsiz, iki katman.
+Haftalık ve gözetimsiz, `scripts/weekly-lint.sh`, iki katman.
 
 1. **Mekanik, deterministik.** `scripts/fix-links.py` yanlış yol linklerini
    otomatik düzeltir, sistemdeki tek otomatik düzenleme budur.
-   `scripts/lint-mech.py` ölü link ve orphan taraması yapar.
-2. **Semantik, sadece rapor.** Çelişkiler, eksik cross reference, sayfası
-   olmayan kavramlar, frontmatter sapmaları. `<proje>/lint-report.md` dosyasına
-   yazılır, `<proje>/log.md`'ye tek satır düşer. Semantik bulgular otomatik
-   düzeltilmez, neyin değişeceğine kullanıcı karar verir.
+   `scripts/lint-mech.py` ölü link ve orphan taraması yapar. Namespace
+   listesi dinamiktir, kökte `sources/` klasörü olan her dizin, yani yeni
+   proje kendiliğinden kapsanır.
+2. **Semantik, sadece rapor, proje başına bir işçi.** Çelişkiler, eksik
+   cross reference, sayfası olmayan kavramlar, frontmatter sapmaları, yanlış
+   link hedefleri. `<proje>/lint-report.md` üzerine yazılır (eski rapor git
+   geçmişinde), `<proje>/log.md`'ye tek satır düşer. Doğrulama mekaniktir,
+   sadece bu iki dosya değişebilir, dolayısıyla başarısız bir proje
+   diğerlerini düşüremez. Semantik bulgular otomatik düzeltilmez, neyin
+   değişeceğine kullanıcı karar verir.
 
 ## Yeni proje ekleme
 
@@ -244,8 +270,9 @@ Haftalık ve gözetimsiz, iki katman.
 
 ## Değişmez kurallar
 
-1. `raw/` asla değiştirilmez, sadece okunur. Tek istisna INGEST akışının 0.
-   adımıdır, o da yeni dosya ekler, mevcuda asla dokunmaz. Süzme sadece sıfır
+1. `raw/` asla değiştirilmez, sadece okunur. Tek istisna INGEST yakalama
+   katmanıdır, o da yeni dosya ekler, mevcuda asla dokunmaz; katman 2
+   işçisinin `raw/` altına yazması doğrulamadan döner. Süzme sadece sıfır
    bilgi taşıyan kayıtları atar, dolayısıyla ham sadakat korunur. Süzme
    listesine yeni bir kayıt türü eklemek şema değişikliğidir: önce kaydın
    hiçbir bilgi taşımadığı kanıtlanır, sonra o satır güncellenir. Fazlalık ham

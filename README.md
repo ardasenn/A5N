@@ -15,10 +15,11 @@ approach you already rejected, because neither of you can remember.
 
 ## What A5N does
 
-Every morning it finds yesterday's sessions, copies the raw transcripts
-somewhere permanent, and distils them into a linked markdown wiki: one page per
-session, plus pages for the decisions, bugs, entities and concepts they touch.
-Once a week it audits that wiki for contradictions, dead links and schema drift.
+Every morning a deterministic script finds yesterday's sessions and copies the
+raw transcripts somewhere permanent. Then one headless agent per session
+distils it into a linked markdown wiki: one page per session, plus pages for
+the decisions, bugs, entities and concepts it touches. Once a week the same
+machinery audits that wiki for contradictions, dead links and schema drift.
 
 The output is plain markdown in a git repository. Obsidian is a nice way to
 browse it and is entirely optional. Nothing is stored anywhere but your disk.
@@ -88,21 +89,41 @@ a scheduled one cannot collide.
 
 ## How it holds together
 
-Unattended jobs fail quietly unless you design against it, so:
+Unattended jobs fail quietly unless you design against it. The architecture
+answers that with one principle: orchestration is deterministic script, the
+model only works at the leaf.
 
-- The agent must end its output with a signature line. No signature means the
-  agent never really ran, the run counts as failed, nothing is committed and a
-  notification fires.
-- The vault is a git repository and the tree is always clean before a run
-  starts. Anything dirty afterwards is agent output, so a failed run is undone
-  with `reset --hard` and half finished work never reaches a commit.
-- A lock file prevents overlap. A lock older than two hours is treated as dead,
-  because a crash cannot run the cleanup trap and a stale lock would silently
-  swallow every later run.
-- A watchdog kills a run that exceeds the wall clock. Not a work limit, only a
-  guard against hanging forever.
-- Skipping is never silent. A session that could not be processed gets a line
-  in the project log saying so.
+- **Discovery never involves a model.** A Python script scans the transcript
+  folders, filters and dedups candidates, and copies survivors into the vault.
+  This is the only time critical work, since agents delete transcripts after a
+  while, and none of it can hallucinate.
+- **One worker per session, verified by its artifact.** Each queued session
+  gets its own headless agent run. When it ends, a script inspects what was
+  actually written to disk: are the changed paths inside the schema, did a
+  page or a reasoned skip line appear, is the frontmatter complete. The
+  worker's own words are never trusted. An earlier design grepped the output
+  for a result signature, and one backtick around it once voided twelve
+  processed sessions.
+- **Units commit independently.** A unit that passes verification is committed
+  on the spot. A unit that fails is rolled back alone, stays in the queue, and
+  retries tomorrow; its siblings' work is already safe. The queue needs no
+  bookkeeping file because the vault itself is the state: a raw transcript
+  with no trace in the pages is, by definition, still queued.
+- **A rejected unit gets one more chance.** The verification reasons are
+  appended to the prompt and the worker runs again, so ordinary compliance
+  variance closes within the run instead of the queue chewing on the same
+  unit for days.
+- The vault is a git repository and the tree is always clean before a worker
+  starts, so a rollback can only ever touch that one worker's output.
+- A lock file prevents overlap, shared by ingest and lint. A lock older than
+  two hours is treated as dead, because a crash cannot run the cleanup trap
+  and a stale lock would silently swallow every later run.
+- A watchdog kills a worker that exceeds its per unit wall clock. Not a work
+  limit, only a guard against hanging forever.
+- Skipping is never silent. Every dropped session gets a deterministic line in
+  the project log, written by the script rather than requested from the model.
+- On a day with nothing to do, the model is never invoked. Silence is success,
+  a notification fires only on failure.
 
 Each of those exists because the missing version of it caused a real failure.
 

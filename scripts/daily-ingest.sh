@@ -1,16 +1,37 @@
 #!/bin/zsh
-# A5N daily ingest. Reads new agent transcripts, turns them into vault pages,
-# commits the result. Meant to be run by a scheduler, but running it by hand
-# does exactly the same thing.
+# A5N daily ingest driver. Meant to be run by a scheduler, but running it by
+# hand does exactly the same thing.
 #
-# Health contract: the agent must leave an "INGEST_RESULT:" line as the last
-# line of stdout (see prompts/daily-ingest.md, section 4). No signature means
-# the agent never really ran, so the run counts as failed and nothing is
-# committed. A "no-new-sessions" signature is normal: no work, no error.
+# ARCHITECTURE. An earlier design ran one big headless agent that did
+# discovery, dedup, copying, page writing and a result signature, with a
+# wholesale rollback on failure. Every week it produced a new choreography
+# failure: a background wait ceiling cut finished runs, a backticked
+# signature line voided twelve processed sessions, a turn ending killed work
+# in flight and the rollback threw away a full day. The principle now:
+# ORCHESTRATION IS DETERMINISTIC, THE MODEL ONLY WORKS AT THE LEAF.
+#
+#   Layer 1  capture: ingest-discover.py capture (pure Python, no LLM).
+#            New raws plus deterministic skip lines, one commit. This is the
+#            only time critical work (agents delete transcripts after ~30
+#            days); page writing has no deadline.
+#   Layer 2  processing: one INDEPENDENT, synchronous claude -p worker PER
+#            SESSION from the queue (subagents and scheduling disallowed).
+#            The moment a unit finishes, ingest-verify.py checks the
+#            ARTIFACT (no signature, no claim). Pass: the unit is committed
+#            IMMEDIATELY. Fail: only THAT unit's leftovers are reset,
+#            sibling units are already safe in their own commits. A failed
+#            unit stays queued and retries tomorrow by itself (state is the
+#            vault: raw present with no id trace means queued).
+#
+#   On an empty day the model is never invoked. Silence is success, a
+#   notification only fires on failure.
 #
 # Every setting comes from config.ini through scripts/config.py. Without a
 # config file this script refuses to start, which is what keeps a checkout of
 # A5N from touching a real vault by accident.
+#
+# Testing: point A5N_CONFIG at a scratch config, and use A5N_MAX_UNITS /
+# A5N_UNIT_TIMEOUT / A5N_NO_NOTIFY to keep the run small and quiet.
 set -u
 
 SCRIPT_DIR="${0:A:h}"
@@ -24,37 +45,38 @@ eval "$CONFIG_EXPORTS"
 
 VAULT="$A5N_VAULT"
 LOGDIR="$VAULT/.a5n-logs"
-PROMPT_FILE="${A5N_PROMPT_FILE:-$REPO/scripts/prompts/daily-ingest.md}"
-RUN_TIMEOUT="$A5N_RUN_TIMEOUT"
+UNIT_PROMPT_FILE="${A5N_PROMPT_FILE:-$REPO/scripts/prompts/ingest-unit.md}"
+# Wall clock per unit. There is no separate ceiling for the whole run: total
+# time is already bounded by max_units * unit_timeout.
+UNIT_TIMEOUT="${A5N_UNIT_TIMEOUT:-1800}"
+CONDENSE_BYTES=$(( ${A5N_CONDENSE_KB:-2048} * 1024 ))
 
-mkdir -p "$LOGDIR"
+mkdir -p "$LOGDIR/condensed"
 LOG="$LOGDIR/$(date +%F).log"
 LOCK="$LOGDIR/.lock"
-OUT="$LOGDIR/.last-run-stdout"
+OUT="$LOGDIR/.last-unit-stdout"
+QTSV="$LOGDIR/.queue.tsv"
 WATCHDOG_FLAG="$LOGDIR/.watchdog-fired"
 
-log() {
-  echo "[$(date '+%F %T')] $*" >> "$LOG"
-}
+log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 
-# Silent failure is the known trap here: an early version logged "committed"
-# after a six second run that did nothing. Real failures must be visible.
+# Silent failure is the known trap in unattended runs. Real failures must be
+# visible.
 notify_fail() {
   log "FAILED: $1"
   [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
   if [ "$(uname)" = "Darwin" ]; then
-    /usr/bin/osascript -e "display notification \"$1\" with title \"A5N ingest failed\"" >/dev/null 2>&1
+    /usr/bin/osascript -e "display notification \"$1\" with title \"A5N ingest\"" >/dev/null 2>&1
   fi
 }
 
-# Undo whatever the agent left behind on failure. The tree is always clean
-# before the agent starts (see the pre-ingest commit below), so anything dirty
-# past that point is agent output, and half finished work must not leak into
-# tomorrow's commit.
-rollback_agent_work() {
+# Undo a failed unit's leftovers. The unit started on a clean tree and its
+# siblings were committed immediately, so the scope is AT MOST one unit. The
+# old "wipe a finished day" risk is structurally gone. (.a5n-logs is
+# gitignored, clean -fd does not touch logs or condensed skeletons.)
+rollback_unit() {
   git reset --hard --quiet >> "$LOG" 2>&1
   git clean -fd --quiet >> "$LOG" 2>&1
-  log "agent leftovers reverted (reset --hard + clean -fd)"
 }
 
 if [ ! -d "$VAULT/.git" ]; then
@@ -64,7 +86,9 @@ if [ ! -d "$VAULT/.git" ]; then
 fi
 
 # A stale lock swallows every later run in silence. A crash or hard reboot
-# cannot run the exit trap, so treat a lock older than two hours as dead.
+# cannot run the exit trap, so a lock older than two hours is dead: in a
+# healthy run the lock is refreshed after every unit and can never age that
+# much while alive.
 if [ -e "$LOCK" ]; then
   LOCK_MTIME="$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null)"
   LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
@@ -89,87 +113,152 @@ touch "$LOCK"
 
 cd "$VAULT" || exit 1
 
-PROMPT="$(cat "$PROMPT_FILE" 2>/dev/null)"
-if [ ! -s "$PROMPT_FILE" ] || [ -z "$PROMPT" ]; then
-  notify_fail "prompt file missing or empty ($PROMPT_FILE), run cancelled"
+if [ ! -s "$UNIT_PROMPT_FILE" ]; then
+  notify_fail "unit prompt missing or empty ($UNIT_PROMPT_FILE), run cancelled"
   exit 1
 fi
 
-# Hand written vault edits should not be mixed into the ingest commit. Commit
-# them separately under an honest message so the agent starts from a clean tree.
+# Hand written vault edits should not be mixed into ingest commits. Commit
+# them separately under an honest message.
 if [ -n "$(git status --porcelain)" ]; then
   log "WARNING: vault dirty before ingest, committing manual edits separately"
   git add -A >> "$LOG" 2>&1
   git commit -m "chore: manual vault changes (pre-ingest $(date +%F))" >> "$LOG" 2>&1
 fi
 
-log "ingest started (wall clock ${RUN_TIMEOUT}s)"
-rm -f "$WATCHDOG_FLAG"
+# ---- Layer 1: capture (deterministic) --------------------------------------
+log "layer 1: capture started"
+if ! python3 "$SCRIPT_DIR/ingest-discover.py" capture >> "$LOG" 2>&1; then
+  # A capture failure is a data risk (the transcript deletion clock is
+  # ticking), so it is loud.
+  notify_fail "capture layer failed, see .a5n-logs/$(date +%F).log"
+  exit 1
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  git add -A >> "$LOG" 2>&1
+  git commit -m "chore: raw capture $(date +%F)" >> "$LOG" 2>&1
+  log "raw capture committed"
+fi
 
-# CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 waits for background subagents without
-# a ceiling. The built in 600s ceiling used to cut runs that had already
-# finished their work, so the result line was never written and the rollback
-# threw good work away. Our own wall clock replaces it, and the watchdog below
-# is what keeps an unbounded wait from hanging forever.
-CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 "$A5N_CLAUDE_BIN" -p "$PROMPT" \
-  --model "$A5N_MODEL" \
-  --permission-mode acceptEdits \
-  --max-turns 200 \
-  > "$OUT" 2>&1 &
-AGENT_PID=$!
+# ---- Layer 2: one worker per unit ------------------------------------------
+python3 "$SCRIPT_DIR/ingest-discover.py" queue > "$QTSV" 2>> "$LOG"
+if [ ! -s "$QTSV" ]; then
+  log "queue empty, model never invoked, healthy day"
+  exit 0
+fi
 
-# If TERM is swallowed, wait never returns. Thirty second grace, then KILL.
-(
-  sleep "$RUN_TIMEOUT"
-  kill -TERM "$AGENT_PID" 2>/dev/null || exit 0
-  touch "$WATCHDOG_FLAG"
-  sleep 30
-  kill -KILL "$AGENT_PID" 2>/dev/null
-) &
-WATCHDOG_PID=$!
+OK=0; FAIL=0; CONSEC_ERR=0
+while IFS=$'\t' read -r PROJ SID RAWP SIZE SDATE; do
+  [ -z "${PROJ:-}" ] && continue
+  log "unit started: $PROJ/$SID (${SIZE}B, $SDATE)"
 
-wait "$AGENT_PID"
-AGENT_EXIT=$?
-kill "$WATCHDOG_PID" 2>/dev/null
-cat "$OUT" >> "$LOG"
-log "agent exit=$AGENT_EXIT"
-
-if [ "$AGENT_EXIT" -ne 0 ]; then
-  if [ -e "$WATCHDOG_FLAG" ]; then
-    notify_fail "wall clock of ${RUN_TIMEOUT}s reached, run cut short, work reverted"
-  else
-    notify_fail "agent exit=$AGENT_EXIT, skipping commit (a half finished ingest is never committed)"
+  READP="$RAWP"
+  if [ "$SIZE" -gt "$CONDENSE_BYTES" ]; then
+    READP="$LOGDIR/condensed/$SID.txt"
+    if ! python3 "$SCRIPT_DIR/condense-transcript.py" "$RAWP" "$READP" >> "$LOG" 2>&1; then
+      log "condense failed: $PROJ/$SID, unit skipped, retries tomorrow"
+      FAIL=$((FAIL+1)); continue
+    fi
   fi
-  rollback_agent_work
-  exit 1
-fi
 
-SIGNATURE="$(grep -a '^INGEST_RESULT:' "$OUT" | tail -1)"
-if [ -z "$SIGNATURE" ]; then
-  notify_fail "no INGEST_RESULT signature, the agent did not run. Output: $(tail -c 200 "$OUT")"
-  rollback_agent_work
-  exit 1
-fi
-log "$SIGNATURE"
+  PROMPT="$(python3 - "$UNIT_PROMPT_FILE" "$PROJ" "$SID" "$RAWP" "$READP" "$SDATE" "$A5N_LANGUAGE" <<'PYEOF'
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+for k, v in zip(("__PROJECT__", "__SESSION_ID__", "__RAW__", "__READ__",
+                 "__DATE__", "__LANGUAGE__"), sys.argv[2:8]):
+    t = t.replace(k, v)
+sys.stdout.write(t)
+PYEOF
+)"
 
-case "$SIGNATURE" in
-  *no-new-sessions*)
-    if [ -n "$(git status --porcelain)" ]; then
-      notify_fail "agent reported no new sessions but the tree is dirty, unexpected, work reverted"
-      rollback_agent_work
-      exit 1
+  # At most two attempts per unit: when a verification rejection names a
+  # fixable cause (a missing id trace, an out of schema path), the second
+  # attempt carries the reasons in its prompt, so model compliance variance
+  # closes within the run instead of the queue chewing on the same unit for
+  # days. Observed: of five same shaped units, two passed first try and
+  # three had skipped the full id trace.
+  UNIT_DONE=""; VREASON=""
+  for ATTEMPT in 1 2; do
+    FULL_PROMPT="$PROMPT"
+    if [ "$ATTEMPT" -eq 2 ]; then
+      FULL_PROMPT="$PROMPT
+
+YOUR PREVIOUS ATTEMPT WAS REJECTED BY VERIFICATION AND ROLLED BACK. The
+rejection reasons:
+$VREASON
+
+Fix these: write the missing trace or file (write the session id IN FULL),
+leave no out of schema path. Every other rule still applies."
+      log "attempt 2 (rejection reasons added to the prompt): $PROJ/$SID"
     fi
-    log "nothing to do, no commit"
-    ;;
-  *)
-    if [ -z "$(git status --porcelain)" ]; then
-      notify_fail "agent reported work but nothing changed on disk"
-      exit 1
-    fi
-    git add -A >> "$LOG" 2>&1
-    git commit -m "chore: daily ingest $(date +%F)" >> "$LOG" 2>&1
-    log "committed"
-    ;;
-esac
 
-log "done"
+    # One synchronous worker. stdin from /dev/null so the worker cannot eat
+    # the while-read loop's queue.
+    rm -f "$WATCHDOG_FLAG"
+    "$A5N_CLAUDE_BIN" -p "$FULL_PROMPT" \
+      --model "$A5N_MODEL" \
+      --permission-mode acceptEdits \
+      --max-turns 80 \
+      --disallowedTools "Agent" "Task" "ScheduleWakeup" "Workflow" "Bash(git commit:*)" "Bash(git push:*)" \
+      > "$OUT" 2>&1 < /dev/null &
+    AGENT_PID=$!
+    # If TERM is swallowed, wait never returns. Thirty second grace, then KILL.
+    (
+      sleep "$UNIT_TIMEOUT"
+      kill -TERM "$AGENT_PID" 2>/dev/null || exit 0
+      touch "$WATCHDOG_FLAG"
+      sleep 30
+      kill -KILL "$AGENT_PID" 2>/dev/null
+    ) &
+    WATCHDOG_PID=$!
+    wait "$AGENT_PID"; AGENT_EXIT=$?
+    kill "$WATCHDOG_PID" 2>/dev/null; WATCHDOG_PID=""
+    cat "$OUT" >> "$LOG"
+
+    if [ "$AGENT_EXIT" -ne 0 ]; then
+      # Infrastructure failure (timeout or API), no in run retry, tomorrow.
+      if [ -e "$WATCHDOG_FLAG" ]; then
+        log "unit cut at the ${UNIT_TIMEOUT}s ceiling: $PROJ/$SID, rolled back, retries tomorrow"
+      else
+        log "agent exit=$AGENT_EXIT: $PROJ/$SID, rolled back"
+        CONSEC_ERR=$((CONSEC_ERR+1))
+      fi
+      rollback_unit
+      break
+    fi
+    CONSEC_ERR=0
+
+    VREASON="$(python3 "$SCRIPT_DIR/ingest-verify.py" "$PROJ" "$SID" 2>&1)"
+    VEXIT=$?
+    echo "$VREASON" >> "$LOG"
+    if [ "$VEXIT" -eq 0 ]; then
+      git add -A >> "$LOG" 2>&1
+      if git commit -m "chore: ingest($PROJ) ${SID:0:8} $SDATE" >> "$LOG" 2>&1; then
+        UNIT_DONE=1; log "unit done and committed: $PROJ/$SID (attempt $ATTEMPT)"
+      else
+        notify_fail "git commit failed ($PROJ/$SID), run stopped, look by hand"
+        exit 1
+      fi
+      break
+    fi
+    log "verification REJECTED (attempt $ATTEMPT): $PROJ/$SID, rolled back"
+    rollback_unit
+  done
+
+  if [ -n "$UNIT_DONE" ]; then
+    OK=$((OK+1))
+  else
+    FAIL=$((FAIL+1))
+    if [ "$CONSEC_ERR" -ge 2 ]; then
+      notify_fail "agent failed $CONSEC_ERR times in a row (API or auth?), run stopped, queue waits for tomorrow"
+      break
+    fi
+  fi
+  touch "$LOCK"
+done < "$QTSV"
+
+log "run finished: $OK done, $FAIL failed"
+if [ "$FAIL" -gt 0 ]; then
+  notify_fail "$FAIL units unprocessed ($OK done), still queued, they retry tomorrow automatically"
+fi
+exit 0
