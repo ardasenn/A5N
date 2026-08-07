@@ -38,7 +38,10 @@ bakın.
 ## Kurulum
 
 macOS veya Linux, Python 3.9 ya da üstü, git, ve gözetimsiz koşular için Claude
-Code CLI gerekir.
+Code CLI ile Codex CLI'dan biri gerekir. İşçileri hangisinin koşturacağı,
+hangi modelle ve hangi reasoning effort'la koşacağı `config.ini` içindeki
+`[runner]` bölümünden seçilir; örnek config kopyala yapıştır değer listeleri
+taşır, böylece yazım hatası zamanlanmış koşuya ulaşamaz.
 
 ```bash
 git clone https://github.com/ardasenn/A5N.git

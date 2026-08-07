@@ -79,6 +79,34 @@ rollback_unit() {
   git clean -fd --quiet >> "$LOG" 2>&1
 }
 
+# Launch one headless worker in the background, pid in AGENT_PID. The engine
+# comes from config.ini [runner]; both drivers dispatch the same way.
+start_worker() {
+  local effort=()
+  if [ "$A5N_RUNNER_ENGINE" = "codex" ]; then
+    # codex exec has no per-tool disallow list; the prompt rules plus the
+    # mechanical artifact verification carry that weight instead.
+    # workspace-write confines writes to the cwd, which is the vault.
+    [ -n "$A5N_RUNNER_EFFORT" ] && effort=(-c "model_reasoning_effort=$A5N_RUNNER_EFFORT")
+    "$A5N_RUNNER_BIN" exec \
+      --sandbox workspace-write \
+      --skip-git-repo-check \
+      -m "$A5N_RUNNER_MODEL" \
+      "${effort[@]}" \
+      "$1" > "$OUT" 2>&1 < /dev/null &
+  else
+    [ -n "$A5N_RUNNER_EFFORT" ] && effort=(--effort "$A5N_RUNNER_EFFORT")
+    "$A5N_RUNNER_BIN" -p "$1" \
+      --model "$A5N_RUNNER_MODEL" \
+      "${effort[@]}" \
+      --permission-mode acceptEdits \
+      --max-turns 80 \
+      --disallowedTools "Agent" "Task" "ScheduleWakeup" "Workflow" "Bash(git commit:*)" "Bash(git push:*)" \
+      > "$OUT" 2>&1 < /dev/null &
+  fi
+  AGENT_PID=$!
+}
+
 if [ ! -d "$VAULT/.git" ]; then
   echo "vault is not a git repository: $VAULT" >&2
   echo "run scripts/setup.sh first" >&2
@@ -195,13 +223,7 @@ leave no out of schema path. Every other rule still applies."
     # One synchronous worker. stdin from /dev/null so the worker cannot eat
     # the while-read loop's queue.
     rm -f "$WATCHDOG_FLAG"
-    "$A5N_CLAUDE_BIN" -p "$FULL_PROMPT" \
-      --model "$A5N_MODEL" \
-      --permission-mode acceptEdits \
-      --max-turns 80 \
-      --disallowedTools "Agent" "Task" "ScheduleWakeup" "Workflow" "Bash(git commit:*)" "Bash(git push:*)" \
-      > "$OUT" 2>&1 < /dev/null &
-    AGENT_PID=$!
+    start_worker "$FULL_PROMPT"
     # If TERM is swallowed, wait never returns. Thirty second grace, then KILL.
     (
       sleep "$UNIT_TIMEOUT"

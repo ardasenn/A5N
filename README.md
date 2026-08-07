@@ -35,8 +35,11 @@ for what the system is actually for.
 
 ## Install
 
-Requires macOS or Linux, Python 3.9 or newer, git, and the Claude Code CLI for
-the unattended runs.
+Requires macOS or Linux, Python 3.9 or newer, git, and one of the Claude Code
+CLI or the Codex CLI for the unattended runs. Which one drives the workers,
+which model it uses and at what reasoning effort are all picked in the
+`[runner]` section of `config.ini`, and the example config carries copy paste
+value lists so a typo cannot reach a scheduled run.
 
 ```bash
 git clone https://github.com/ardasenn/A5N.git

@@ -32,8 +32,12 @@ DEFAULTS = {
     "agents": {
         "claude_projects": "",
         "codex_sessions": "",
-        "claude_bin": "auto",
+    },
+    "runner": {
+        "engine": "claude",
+        "bin": "auto",
         "model": "claude-sonnet-5",
+        "effort": "",
     },
     "schedule": {"enabled": "yes", "ingest": "09:07", "lint": "sun 11:07"},
     "limits": {
@@ -80,19 +84,50 @@ def load(path=None):
     if not cfg["vault"]["path"]:
         raise ConfigError(f"vault.path is empty in {path}")
 
-    binary = cfg["agents"]["claude_bin"]
-    if binary == "auto":
-        found = shutil.which("claude")
-        if not found:
-            raise ConfigError(
-                "agents.claude_bin is 'auto' but no 'claude' was found on PATH.\n"
-                "Install the CLI or set an explicit path in config.ini."
-            )
-        cfg["agents"]["claude_bin"] = found
+    _validate_runner(cfg["runner"])
 
     cfg["_projects"] = _projects(parser)
     cfg["_config_path"] = str(path)
     return cfg
+
+
+# Effort is a closed list per engine and IS validated, because a typo here
+# only surfaces days later as a failed scheduled run. Model strings are
+# deliberately not validated: model names change faster than this file, so
+# the copy-paste lists live in config.example.ini instead.
+EFFORT_LEVELS = {
+    "claude": ("low", "medium", "high", "xhigh", "max"),
+    "codex": ("low", "medium", "high", "xhigh"),
+}
+
+
+def _validate_runner(runner):
+    engine = runner["engine"].strip().lower()
+    if engine not in ("claude", "codex"):
+        raise ConfigError(
+            f"runner.engine is '{runner['engine']}', must be exactly "
+            f"'claude' or 'codex'."
+        )
+    runner["engine"] = engine
+
+    if runner["bin"] == "auto":
+        found = shutil.which(engine)
+        if not found:
+            raise ConfigError(
+                f"runner.bin is 'auto' but no '{engine}' was found on PATH.\n"
+                f"Install the CLI or set an explicit path in config.ini."
+            )
+        runner["bin"] = found
+
+    effort = runner["effort"].strip().lower()
+    if effort and effort not in EFFORT_LEVELS[engine]:
+        raise ConfigError(
+            f"runner.effort '{runner['effort']}' is not valid for engine "
+            f"'{engine}'. Copy-paste one of: "
+            f"{' | '.join(EFFORT_LEVELS[engine])}, or leave it empty for "
+            f"the CLI default."
+        )
+    runner["effort"] = effort
 
 
 def _projects(parser):
@@ -135,8 +170,10 @@ def _emit_shell(cfg):
         "A5N_VAULT": cfg["vault"]["path"],
         "A5N_LANGUAGE": cfg["vault"]["language"],
         "A5N_VAULT_TITLE": cfg["vault"]["title"],
-        "A5N_CLAUDE_BIN": cfg["agents"]["claude_bin"],
-        "A5N_MODEL": cfg["agents"]["model"],
+        "A5N_RUNNER_ENGINE": cfg["runner"]["engine"],
+        "A5N_RUNNER_BIN": cfg["runner"]["bin"],
+        "A5N_RUNNER_MODEL": cfg["runner"]["model"],
+        "A5N_RUNNER_EFFORT": cfg["runner"]["effort"],
         "A5N_CLAUDE_PROJECTS": cfg["agents"]["claude_projects"],
         "A5N_CODEX_SESSIONS": cfg["agents"]["codex_sessions"],
         "A5N_SCHEDULE_ENABLED": cfg["schedule"]["enabled"],
@@ -192,6 +229,9 @@ def main(argv):
             return 1
         print(f"config OK: {cfg['_config_path']}")
         print(f"vault: {cfg['vault']['path']} ({cfg['vault']['language']})")
+        effort = cfg["runner"]["effort"] or "default"
+        print(f"runner: {cfg['runner']['engine']} ({cfg['runner']['bin']}), "
+              f"model {cfg['runner']['model']}, effort {effort}")
         for p in cfg["_projects"]:
             print(f"project: {p['name']} (match '{p['match']}', since {p['watermark']})")
     else:
