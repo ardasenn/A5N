@@ -160,13 +160,16 @@ yaprakta çalışır.
   içinde kapanır, kuyruk günlerce aynı birimi çiğnemez.
 - Vault bir git repo'sudur ve işçi başlamadan önce ağaç her zaman temizdir,
   dolayısıyla geri alma yalnızca o işçinin çıktısına dokunabilir.
-- Kilit dosyası çakışmayı engeller, ingest ile lint aynı kilidi paylaşır. İki
-  saatten eski kilit ölü sayılır, çünkü çöken bir süreç temizlik trap'ini
-  çalıştıramaz ve ölü kilit sonraki tüm koşuları sessizce yutar.
+- Tek kilit dosyasını bütün görevler paylaşır, ingest, lint ve digest,
+  dolayısıyla hiçbiri diğeriyle çakışamaz. İki saatten eski kilit ölü
+  sayılır, çünkü çöken bir süreç temizlik trap'ini çalıştıramaz ve ölü kilit
+  sonraki tüm koşuları sessizce yutar.
 - Watchdog, birim başına duvar saatini aşan işçiyi keser. Bu bir iş sınırı
   değil, sadece sonsuza asılmaya karşı bir koruma.
-- Atlama asla sessiz olmaz. Elenen her oturum için proje log'una deterministik
-  bir satır düşer, modelden rica edilmez, script yazar.
+- Atlama asla sessiz olmaz. İçeriği yüzünden elenen her oturum, küçük ya da
+  kopya, proje log'una deterministik bir satır düşürür; modelden rica
+  edilmez, script yazar. İki istisna bilinçlidir: watermark elemesi zaten
+  senin ayarındır, fazla taze oturum ise sadece yarını bekler.
 - Yapılacak iş olmayan günde model hiç çağrılmaz. Sessizlik başarıdır,
   bildirim sadece hatada düşer.
 

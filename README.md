@@ -159,13 +159,17 @@ model only works at the leaf.
   unit for days.
 - The vault is a git repository and the tree is always clean before a worker
   starts, so a rollback can only ever touch that one worker's output.
-- A lock file prevents overlap, shared by ingest and lint. A lock older than
-  two hours is treated as dead, because a crash cannot run the cleanup trap
-  and a stale lock would silently swallow every later run.
+- One lock file is shared by every job, ingest, lint and digest, so none can
+  overlap another. A lock older than two hours is treated as dead, because a
+  crash cannot run the cleanup trap and a stale lock would silently swallow
+  every later run.
 - A watchdog kills a worker that exceeds its per unit wall clock. Not a work
   limit, only a guard against hanging forever.
-- Skipping is never silent. Every dropped session gets a deterministic line in
-  the project log, written by the script rather than requested from the model.
+- Skipping is never silent. Every session dropped on its merits, too small or
+  a duplicate, gets a deterministic line in the project log, written by the
+  script rather than requested from the model. The two exceptions are
+  deliberate: watermark drops are configured, and a too fresh session simply
+  waits for tomorrow.
 - On a day with nothing to do, the model is never invoked. Silence is success,
   a notification fires only on failure.
 

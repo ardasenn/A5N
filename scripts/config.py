@@ -20,6 +20,7 @@ As a module:
 """
 import configparser
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -69,7 +70,12 @@ def load(path=None):
             f"    cp {REPO_ROOT / 'config.example.ini'} {REPO_ROOT / 'config.ini'}"
         )
     parser = configparser.ConfigParser()
-    parser.read(path, encoding="utf-8")
+    try:
+        parser.read(path, encoding="utf-8")
+    except configparser.Error as exc:
+        # a syntax error in a hand edited ini deserves a message, not a
+        # traceback
+        raise ConfigError(f"config.ini could not be parsed:\n{exc}")
 
     cfg = {section: dict(values) for section, values in DEFAULTS.items()}
     for section in parser.sections():
@@ -86,10 +92,35 @@ def load(path=None):
         raise ConfigError(f"vault.path is empty in {path}")
 
     _validate_runner(cfg["runner"])
+    _validate_schedule(cfg["schedule"])
 
     cfg["_projects"] = _projects(parser)
     cfg["_config_path"] = str(path)
     return cfg
+
+
+SCHEDULE_RX = re.compile(
+    r"^(?:(sun|mon|tue|wed|thu|fri|sat|\d{1,2}) )?([01]?\d|2[0-3]):[0-5]\d$")
+
+
+def _validate_schedule(schedule):
+    """A typo here is worse than a failed run: an unparseable schedule used
+    to reach setup.sh, whose calendar_keys died only inside a command
+    substitution, and the job was installed with an EMPTY launchd calendar,
+    which launchd reads as "fire every minute"."""
+    for job in ("ingest", "lint", "digest"):
+        spec = schedule[job].strip()
+        m = SCHEDULE_RX.match(spec)
+        day_ok = True
+        if m and m.group(1) and m.group(1).isdigit():
+            day_ok = 1 <= int(m.group(1)) <= 31
+        if not m or not day_ok:
+            raise ConfigError(
+                f"schedule.{job} '{schedule[job]}' is not valid. Use HH:MM "
+                f"(daily), 'sun HH:MM' (weekly) or '1 HH:MM' (day of "
+                f"month, 1-31)."
+            )
+        schedule[job] = spec
 
 
 # Effort is a closed list per engine and IS validated, because a typo here
@@ -111,15 +142,6 @@ def _validate_runner(runner):
         )
     runner["engine"] = engine
 
-    if runner["bin"] == "auto":
-        found = shutil.which(engine)
-        if not found:
-            raise ConfigError(
-                f"runner.bin is 'auto' but no '{engine}' was found on PATH.\n"
-                f"Install the CLI or set an explicit path in config.ini."
-            )
-        runner["bin"] = found
-
     effort = runner["effort"].strip().lower()
     if effort and effort not in EFFORT_LEVELS[engine]:
         raise ConfigError(
@@ -129,6 +151,27 @@ def _validate_runner(runner):
             f"the CLI default."
         )
     runner["effort"] = effort
+
+
+def resolve_runner_bin(cfg):
+    """Resolve runner.bin, raising when the CLI is missing.
+
+    Deliberately NOT part of load(): only the two drivers actually invoke
+    the runner. Read only consumers, the MCP server above all, must keep
+    working when the CLI is absent; a vault whose read path goes down
+    because a write path binary was uninstalled would be absurd.
+    """
+    binary = cfg["runner"]["bin"]
+    if binary != "auto":
+        return binary
+    found = shutil.which(cfg["runner"]["engine"])
+    if not found:
+        raise ConfigError(
+            f"runner.bin is 'auto' but no '{cfg['runner']['engine']}' was "
+            f"found on PATH.\nInstall the CLI or set an explicit path in "
+            f"config.ini."
+        )
+    return found
 
 
 def _projects(parser):
@@ -164,6 +207,14 @@ def _shell_quote(value):
     return "'" + str(value).replace("'", "'\\''") + "'"
 
 
+# Keys a caller may pre-set in the environment to override config.ini for
+# one run: the documented test knobs and the setup backfill's lifted unit
+# cap. Everything else, the vault path above all, ignores the environment
+# on purpose: a stale exported A5N_VAULT silently redirecting a scheduled
+# run into the wrong vault is not a feature.
+ENV_OVERRIDABLE = {"A5N_MAX_UNITS", "A5N_UNIT_TIMEOUT"}
+
+
 def _emit_shell(cfg):
     flat = {
         "A5N_REPO": REPO_ROOT,
@@ -172,7 +223,7 @@ def _emit_shell(cfg):
         "A5N_LANGUAGE": cfg["vault"]["language"],
         "A5N_VAULT_TITLE": cfg["vault"]["title"],
         "A5N_RUNNER_ENGINE": cfg["runner"]["engine"],
-        "A5N_RUNNER_BIN": cfg["runner"]["bin"],
+        "A5N_RUNNER_BIN": resolve_runner_bin(cfg),
         "A5N_RUNNER_MODEL": cfg["runner"]["model"],
         "A5N_RUNNER_EFFORT": cfg["runner"]["effort"],
         "A5N_CLAUDE_PROJECTS": cfg["agents"]["claude_projects"],
@@ -189,7 +240,12 @@ def _emit_shell(cfg):
         "A5N_PROJECT_NAMES": " ".join(p["name"] for p in cfg["_projects"]),
     }
     for key, value in flat.items():
-        print(f"export {key}={_shell_quote(value)}")
+        if key in ENV_OVERRIDABLE:
+            # emitted as "set only if unset", or eval-ing these exports
+            # would clobber the very overrides the drivers document
+            print(f'[ -n "${{{key}:-}}" ] || export {key}={_shell_quote(value)}')
+        else:
+            print(f"export {key}={_shell_quote(value)}")
 
 
 def _dotted(cfg, key):
@@ -210,7 +266,11 @@ def main(argv):
 
     mode = argv[1]
     if mode == "--sh":
-        _emit_shell(cfg)
+        try:
+            _emit_shell(cfg)
+        except ConfigError as exc:
+            sys.stderr.write(f"A5N config error:\n{exc}\n")
+            return 1
     elif mode == "--get":
         if len(argv) < 3:
             sys.exit("--get needs a key, for example vault.path")
@@ -232,8 +292,20 @@ def main(argv):
         print(f"config OK: {cfg['_config_path']}")
         print(f"vault: {cfg['vault']['path']} ({cfg['vault']['language']})")
         effort = cfg["runner"]["effort"] or "default"
-        print(f"runner: {cfg['runner']['engine']} ({cfg['runner']['bin']}), "
+        try:
+            resolved = resolve_runner_bin(cfg)
+        except ConfigError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
+        print(f"runner: {cfg['runner']['engine']} ({resolved}), "
               f"model {cfg['runner']['model']}, effort {effort}")
+        stale = [k for k in ("claude_bin", "model") if k in cfg["agents"]]
+        if "run_timeout" in cfg["limits"]:
+            stale.append("run_timeout")
+        if stale:
+            print(f"note: obsolete settings ignored: {', '.join(stale)}. "
+                  f"The runner CLI/model moved to [runner], run_timeout "
+                  f"became limits.unit_timeout.")
         for p in cfg["_projects"]:
             print(f"project: {p['name']} (match '{p['match']}', since {p['watermark']})")
     else:

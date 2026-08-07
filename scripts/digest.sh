@@ -47,7 +47,11 @@ if [ -e "$LOCK" ]; then
     log "WARNING: stale lock (${LOCK_AGE}s), removing and continuing"
     rm -f "$LOCK"
   else
-    log "lock held (${LOCK_AGE}s, another job is running), digest skipped"
+    # Not silent on purpose: the digest exists to make things visible, and
+    # a silently skipped month looks identical to a broken pipeline. The
+    # 09:37 slot can legitimately collide with a long first-of-month
+    # ingest, which may hold the shared lock for hours.
+    notify "another job holds the lock (${LOCK_AGE}s, probably the ingest), digest skipped; run scripts/digest.sh by hand"
     exit 0
   fi
 fi

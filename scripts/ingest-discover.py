@@ -252,12 +252,16 @@ def capture(cfg, dry):
         dup_note = None
         if fl is not None and fl in index_of(name):
             rels = [(relation(src, ex), ex) for ex in index_of(name)[fl]]
-            # The OTHER file's name is truncated to 8 chars on purpose. A
-            # full filename in a log line would put that session's complete
-            # id into the namespace, and "id appears in the namespace" is
-            # the processed test: the kept session would silently drop out
-            # of the queue before its page was ever written. Caught by a
-            # smoke test on 2026-08-07.
+            # Ids inside these log lines are truncated to 8 chars, with ONE
+            # exception: the subset skip line carries the candidate's full
+            # id, because that line IS the processed trace that removes the
+            # (never copied) candidate from the queue. Everywhere else a
+            # full id would be poison: "id appears in the namespace" is the
+            # processed test, so a full id in a mere note silently drops
+            # that session from the queue before any page exists. Both
+            # directions of this bug shipped once, caught by smoke tests
+            # on 2026-08-07: first the kept file's name in the skip line,
+            # then the candidate's own id in the superset note.
             other = os.path.basename(rels[0][1])[:8] + "…"
             if any(r == "subset" for r, _ in rels):
                 counts["redundant"] += 1
@@ -268,12 +272,12 @@ def capture(cfg, dry):
                 continue
             if any(r == "superset" for r, _ in rels):
                 counts["larger"] += 1
-                dup_note = (f"note | {sid} is a LARGER copy of the same "
-                            f"conversation ({other} kept, pruning is the "
-                            f"user's call)")
+                dup_note = (f"note | {sid[:8]}… is a LARGER copy of the "
+                            f"same conversation ({other} kept, pruning is "
+                            f"the user's call)")
             else:
                 counts["divergent"] += 1
-                dup_note = (f"note | {sid} shares its first line with "
+                dup_note = (f"note | {sid[:8]}… shares its first line with "
                             f"{other} but the content forks, both kept, "
                             f"check them")
 

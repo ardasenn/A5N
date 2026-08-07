@@ -169,7 +169,12 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 # ---- Layer 2: one worker per unit ------------------------------------------
-python3 "$SCRIPT_DIR/ingest-discover.py" queue > "$QTSV" 2>> "$LOG"
+# The queue step is checked like capture: an ignored crash here would print
+# "healthy day" forever while unprocessed raws pile up in silence.
+if ! python3 "$SCRIPT_DIR/ingest-discover.py" queue > "$QTSV" 2>> "$LOG"; then
+  notify_fail "queue step failed, see .a5n-logs/$(date +%F).log"
+  exit 1
+fi
 if [ ! -s "$QTSV" ]; then
   log "queue empty, model never invoked, healthy day"
   exit 0

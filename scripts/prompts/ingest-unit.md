@@ -54,8 +54,9 @@ SPECIAL CASES
 RULES
 - FORBIDDEN: subagents/Agent/Task, ScheduleWakeup, background work,
   git commit/push, processing any other session, doing discovery, writing
-  under raw/, writing outside the vault, leaving out of schema or scratch
-  files in the vault (use /tmp for intermediate work).
+  under raw/, writing outside the vault, and leaving out of schema or
+  scratch files in the vault. You need no intermediate files: read, then
+  write the pages directly.
 - Before your turn ends, EVERY file must already be written to disk. There
   is no "I will continue later", this is a one shot headless run and the
   process dies the moment the turn ends.

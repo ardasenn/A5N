@@ -25,15 +25,15 @@ one.
    disagree. The vault rule is that a contradiction gets a `## CONFLICT`
    heading rather than deletion, so an unmarked contradiction is a finding.
 2. **Missing cross references.** A ticket code or a concept that has its own
-   page appears as plain text without a link (grep is enough; first twenty
-   examples plus the total).
+   page appears as plain text without a link (the Grep tool is enough; first
+   twenty examples plus the total).
 3. **Concepts with no page.** Terms appearing in three or more sessions with
    no entity or concept page of their own (at most ten candidates, each with
    the number of pages it appears in).
 4. **Frontmatter, closed enum audit.** Pages with no frontmatter, a
    `status:` outside its list (active|stale|archived), or a missing
    `source:` field; in bugs/, a missing or out of list `state:` value
-   (index.md and log.md excluded; Bash or grep is enough). The lists are
+   (index.md and log.md excluded; the Grep tool is enough). The lists are
    closed, so a plausible looking new value is still a finding.
 5. **Wrong link targets.** Pages where a `[[...]]` or `[text](path)` points
    at a repository code path or a symbol name rather than a vault page.

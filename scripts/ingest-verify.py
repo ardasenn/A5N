@@ -38,7 +38,11 @@ REQUIRED_FM_KEYS = ("title", "tags", "source", "date", "status")
 
 
 def changed_paths():
-    out = subprocess.run(["git", "status", "--porcelain"],
+    # quotepath=off: with the default on, non-ASCII filenames (Turkish
+    # slugs) arrive octal-escaped and quoted, so they never match the
+    # glob-derived paths in the frontmatter check and silently skip it.
+    out = subprocess.run(["git", "-c", "core.quotepath=off", "status",
+                          "--porcelain"],
                          capture_output=True, text=True, check=True).stdout
     paths = []
     for line in out.splitlines():

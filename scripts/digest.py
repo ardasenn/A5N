@@ -45,7 +45,8 @@ CATEGORIES = {"sources", "entities", "concepts", "decisions", "bugs",
 NOT_A_SOURCE = {"CLAUDE.md", "AGENTS.md", "lint-report.md"}
 INGEST_RX = re.compile(r"^chore: ingest\(([^)]+)\)")
 WIKI_RX = re.compile(r"\[\[([^\]|#]+)")
-SKIP_LINE_RX = re.compile(r"^## \[(\d{4}-\d{2})-\d{2}\] (skip|note) \|")
+# skip lines only: "note |" lines record kept duplicates, not filter drops
+SKIP_LINE_RX = re.compile(r"^## \[(\d{4}-\d{2})-\d{2}\] skip \|")
 INLINE_CODE = re.compile(r"`[^`]*`")
 FENCE = re.compile(r"^\s*(```|~~~)")
 

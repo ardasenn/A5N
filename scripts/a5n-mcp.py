@@ -159,6 +159,15 @@ def recency_bonus(date_str, today):
 
 
 def do_search(vault, query, project, limit):
+    # project is an MCP argument, which makes it attacker adjacent: a
+    # prompt injected caller chooses it freely, and os.path.join with an
+    # absolute or ../ value would walk right out of the vault. Only a bare
+    # name naming an existing vault directory is accepted.
+    if project:
+        if project != os.path.basename(project) or project.startswith("."):
+            return f"project must be a bare namespace name, got: {project}"
+        if not os.path.isdir(os.path.join(vault, project)):
+            return f"no such namespace in the vault: {project}"
     terms = [t for t in re.split(r"\W+", query.lower()) if len(t) >= 2]
     if not terms:
         return "query has no searchable terms"

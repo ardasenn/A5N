@@ -102,6 +102,11 @@ install_launchd() {
     </array>
     <key>WorkingDirectory</key>
     <string>$REPO</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
     <key>StartCalendarInterval</key>
     <dict>
 $calendar
@@ -114,8 +119,11 @@ $calendar
 </plist>
 PLIST
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null
-  launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null
-  say "  $label"
+  if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then
+    say "  $label"
+  else
+    say "  warning: launchctl refused $label; inspect with: launchctl print gui/$(id -u)/$label"
+  fi
 }
 
 # "09:07", "sun 11:07" and "1 09:37" turn into launchd calendar keys. A
@@ -161,9 +169,16 @@ calendar_keys() {
 if [ "$A5N_SCHEDULE_ENABLED" = "yes" ]; then
   if [ "$(uname)" = "Darwin" ]; then
     say "installing scheduled jobs"
-    install_launchd "com.a5n.ingest" "$REPO/scripts/daily-ingest.sh" "$(calendar_keys "$A5N_SCHEDULE_INGEST")"
-    install_launchd "com.a5n.lint" "$REPO/scripts/weekly-lint.sh" "$(calendar_keys "$A5N_SCHEDULE_LINT")"
-    install_launchd "com.a5n.digest" "$REPO/scripts/digest.sh" "$(calendar_keys "$A5N_SCHEDULE_DIGEST")"
+    # calendar_keys output is captured and CHECKED before any plist is
+    # written: a die() inside $(...) only kills the subshell, and an empty
+    # calendar dict means "fire every minute" to launchd. config.py
+    # validates the schedule strings too; this is the second seatbelt.
+    CAL_INGEST="$(calendar_keys "$A5N_SCHEDULE_INGEST")" || die "invalid ingest schedule: $A5N_SCHEDULE_INGEST"
+    CAL_LINT="$(calendar_keys "$A5N_SCHEDULE_LINT")" || die "invalid lint schedule: $A5N_SCHEDULE_LINT"
+    CAL_DIGEST="$(calendar_keys "$A5N_SCHEDULE_DIGEST")" || die "invalid digest schedule: $A5N_SCHEDULE_DIGEST"
+    install_launchd "com.a5n.ingest" "$REPO/scripts/daily-ingest.sh" "$CAL_INGEST"
+    install_launchd "com.a5n.lint" "$REPO/scripts/weekly-lint.sh" "$CAL_LINT"
+    install_launchd "com.a5n.digest" "$REPO/scripts/digest.sh" "$CAL_DIGEST"
   else
     say "scheduling is macOS only for now. Add these to crontab yourself:"
     say "  ingest at $A5N_SCHEDULE_INGEST -> $REPO/scripts/daily-ingest.sh"
