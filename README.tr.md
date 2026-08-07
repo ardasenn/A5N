@@ -41,8 +41,8 @@ macOS veya Linux, Python 3.9 ya da üstü, git, ve gözetimsiz koşular için Cl
 Code CLI gerekir.
 
 ```bash
-git clone https://github.com/<sen>/a5n.git
-cd a5n
+git clone https://github.com/ardasenn/A5N.git
+cd A5N
 cp config.example.ini config.ini
 $EDITOR config.ini
 zsh scripts/setup.sh

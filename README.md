@@ -39,8 +39,8 @@ Requires macOS or Linux, Python 3.9 or newer, git, and the Claude Code CLI for
 the unattended runs.
 
 ```bash
-git clone https://github.com/<you>/a5n.git
-cd a5n
+git clone https://github.com/ardasenn/A5N.git
+cd A5N
 cp config.example.ini config.ini
 $EDITOR config.ini
 zsh scripts/setup.sh
