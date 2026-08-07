@@ -25,7 +25,8 @@ except ConfigError as exc:
     sys.stderr.write(f"A5N config error:\n{exc}\n")
     raise SystemExit(1)
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else VAULT / ".a5n-logs" / "lint-mech"
-SKIP_PARTS = {".git", ".obsidian", ".a5n-logs", "raw", "scripts", ".claude", "node_modules"}
+SKIP_PARTS = {".git", ".obsidian", ".a5n-logs", "raw", "scripts", ".claude",
+              "node_modules", "digests"}
 # A namespace is any root directory holding a sources/ folder, so a new
 # project is covered without touching this file.
 PROJECTS = sorted(d.name for d in VAULT.iterdir() if (d / "sources").is_dir())

@@ -36,6 +36,7 @@ vault/
 ├── GOALS.md     hedeflerin hep güncel tek dosya fotoğrafı, aşağıya bakın
 ├── patterns/    projeler arası yöntem sayfaları, stack'ten bağımsız
 ├── chess-moves/ ileriye dönük strateji oturumları, tarihli, aşağıya bakın
+├── digests/     aylık özet sayfaları, zamanlanmış digest görevi yazar
 └── <proje>/     proje başına bir namespace, her biri kendi index ve log'uyla
 ```
 

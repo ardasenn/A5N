@@ -39,7 +39,8 @@ DEFAULTS = {
         "model": "claude-sonnet-5",
         "effort": "",
     },
-    "schedule": {"enabled": "yes", "ingest": "09:07", "lint": "sun 11:07"},
+    "schedule": {"enabled": "yes", "ingest": "09:07", "lint": "sun 11:07",
+                 "digest": "1 09:37"},
     "limits": {
         "min_session_kb": "50",
         "settle_hours": "2",
@@ -179,6 +180,7 @@ def _emit_shell(cfg):
         "A5N_SCHEDULE_ENABLED": cfg["schedule"]["enabled"],
         "A5N_SCHEDULE_INGEST": cfg["schedule"]["ingest"],
         "A5N_SCHEDULE_LINT": cfg["schedule"]["lint"],
+        "A5N_SCHEDULE_DIGEST": cfg["schedule"]["digest"],
         "A5N_MIN_SESSION_KB": cfg["limits"]["min_session_kb"],
         "A5N_SETTLE_HOURS": cfg["limits"]["settle_hours"],
         "A5N_UNIT_TIMEOUT": cfg["limits"]["unit_timeout"],

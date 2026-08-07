@@ -90,6 +90,47 @@ zsh scripts/weekly-lint.sh     # what it runs weekly
 Both are safe to run by hand at any time. They take a lock, so a manual run and
 a scheduled one cannot collide.
 
+## Reading it back
+
+The vault is only worth what gets read out of it, so A5N ships an MCP server
+that gives any MCP capable agent read access: ranked search over the pages, a
+vault overview, and full page reads. Register it once per machine and every
+agent session can consult the vault before repeating your history:
+
+```bash
+claude mcp add --scope user a5n -- python3 "$(pwd)/scripts/a5n-mcp.py"
+```
+
+```toml
+# Codex, in ~/.codex/config.toml
+[mcp_servers.a5n]
+command = "python3"
+args = ["/path/to/A5N/scripts/a5n-mcp.py"]
+```
+
+The server is read only, never opens `raw/`, and does its own ranking, so a
+query costs nothing beyond what the calling agent was already spending.
+`setup.sh` prints these commands with the real paths filled in.
+
+## Seeing what accumulates
+
+Once a month a deterministic script, no model involved, turns the vault's git
+history into one page under `digests/`: sessions processed per project, pages
+created and updated, new patterns, the most referenced pages, and a health
+line that says out loud when a month went by with nothing processed. That last
+one matters: a pipeline that fails in silence looks identical to a quiet
+month until something makes the difference visible.
+
+```bash
+zsh scripts/digest.sh            # previous month
+zsh scripts/digest.sh 2026-07    # any month
+```
+
+At setup time, if sessions are already waiting, A5N offers to process the
+backlog immediately instead of leaving the first value moment to tomorrow's
+schedule. The `watermark` in `config.ini` controls how far back that history
+reaches.
+
 ## How it holds together
 
 Unattended jobs fail quietly unless you design against it. The architecture

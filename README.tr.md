@@ -92,6 +92,47 @@ zsh scripts/weekly-lint.sh     # haftalık koştuğu
 İkisi de istediğin an elle çalıştırılabilir. Kilit aldıkları için elle koşu ile
 zamanlanmış koşu çakışamaz.
 
+## Geri okumak
+
+Vault ancak içinden okunan kadar değerlidir; bu yüzden A5N, MCP destekli her
+ajana okuma erişimi veren bir MCP server ile gelir: sayfalarda sıralı arama,
+vault genel görünümü ve tam sayfa okuma. Makine başına bir kez kaydet, her
+ajan oturumu geçmişini tekrarlamadan önce vault'a danışabilsin:
+
+```bash
+claude mcp add --scope user a5n -- python3 "$(pwd)/scripts/a5n-mcp.py"
+```
+
+```toml
+# Codex, ~/.codex/config.toml içine
+[mcp_servers.a5n]
+command = "python3"
+args = ["/path/to/A5N/scripts/a5n-mcp.py"]
+```
+
+Server salt okunurdur, `raw/` altını asla açmaz ve sıralamayı kendi yapar;
+yani bir sorgu, çağıran ajanın zaten harcadığının ötesinde hiçbir şeye mal
+olmaz. `setup.sh` bu komutları gerçek yollarla doldurup basar.
+
+## Birikeni görmek
+
+Ayda bir, deterministik bir script, model yok, vault'un git geçmişini
+`digests/` altında tek sayfaya çevirir: proje başına işlenen oturumlar,
+açılan ve güncellenen sayfalar, yeni pattern'lar, en çok referans alan
+sayfalar, ve hiçbir şey işlenmeden geçen ayı yüksek sesle söyleyen bir sağlık
+satırı. O son madde önemli: sessizce bozulan bir boru hattı, biri farkı
+görünür kılana kadar sakin bir aydan ayırt edilemez.
+
+```bash
+zsh scripts/digest.sh            # geçen ay
+zsh scripts/digest.sh 2026-07    # herhangi bir ay
+```
+
+Kurulum anında bekleyen oturumlar varsa A5N, ilk değer anını yarınki
+zamanlanmış koşuya bırakmak yerine birikimi hemen işlemeyi önerir.
+`config.ini` içindeki `watermark` o geçmişin ne kadar geriye uzanacağını
+belirler.
+
 ## Neden bozulmuyor
 
 Gözetimsiz görevler, aksi tasarlanmadıkça sessizce başarısız olur. Mimarinin

@@ -28,7 +28,8 @@ try:
 except ConfigError as exc:
     sys.stderr.write(f"A5N config error:\n{exc}\n")
     raise SystemExit(1)
-SKIP_PARTS = {".git", ".obsidian", ".a5n-logs", "raw", "scripts", ".claude", "node_modules"}
+SKIP_PARTS = {".git", ".obsidian", ".a5n-logs", "raw", "scripts", ".claude",
+              "node_modules", "digests"}
 
 pages = []
 for p in sorted(VAULT.rglob("*.md")):

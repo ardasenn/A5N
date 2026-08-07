@@ -33,6 +33,7 @@ vault/
 ├── GOALS.md     always current snapshot of your goals, see below
 ├── patterns/    cross project method pages, stack agnostic
 ├── chess-moves/ forward looking strategy sessions, dated, see below
+├── digests/     monthly value digests, written by the scheduled digest job
 └── <project>/   one namespace per project, each with its own index and log
 ```
 

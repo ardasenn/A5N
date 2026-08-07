@@ -22,8 +22,8 @@ say ""
 say "vault: $VAULT"
 
 # --- vault skeleton -------------------------------------------------------
-mkdir -p "$VAULT"/{patterns,chess-moves,.a5n-logs}
-touch "$VAULT/patterns/.gitkeep" "$VAULT/chess-moves/.gitkeep"
+mkdir -p "$VAULT"/{patterns,chess-moves,digests,.a5n-logs}
+touch "$VAULT/patterns/.gitkeep" "$VAULT/chess-moves/.gitkeep" "$VAULT/digests/.gitkeep"
 
 render() {
   # render <template> <destination>. Substitutes {{TOKENS}}. Never overwrites.
@@ -118,24 +118,39 @@ PLIST
   say "  $label"
 }
 
-# "09:07" and "sun 11:07" turn into launchd calendar keys.
+# "09:07", "sun 11:07" and "1 09:37" turn into launchd calendar keys. A
+# leading token that is all digits is a day of the month (monthly job), a
+# named token is a weekday (weekly job), no token means daily.
 calendar_keys() {
-  local spec="$1" weekday="" clock="$spec"
+  # One assignment per local: zsh expands every right hand side of a single
+  # local statement BEFORE any of its assignments happen, so clock="$spec"
+  # on the shared line read the (unset) outer spec and the daily schedule
+  # silently produced empty Hour/Minute keys in the plist.
+  local spec="$1"
+  local when="" clock="$spec"
   case "$spec" in
-    *" "*) weekday="${spec%% *}"; clock="${spec##* }" ;;
+    *" "*) when="${spec%% *}"; clock="${spec##* }" ;;
   esac
-  local hour="${clock%%:*}" minute="${clock##*:}"
+  local hour="${clock%%:*}"
+  local minute="${clock##*:}"
   local out=""
-  if [ -n "$weekday" ]; then
-    local index
-    case "$weekday" in
-      sun) index=0 ;; mon) index=1 ;; tue) index=2 ;; wed) index=3 ;;
-      thu) index=4 ;; fri) index=5 ;; sat) index=6 ;;
-      *) die "unknown weekday in schedule: $weekday" ;;
-    esac
-    out="        <key>Weekday</key>
+  if [ -n "$when" ]; then
+    case "$when" in
+      <1-31>)
+        out="        <key>Day</key>
+        <integer>$when</integer>
+" ;;
+      *)
+        local index
+        case "$when" in
+          sun) index=0 ;; mon) index=1 ;; tue) index=2 ;; wed) index=3 ;;
+          thu) index=4 ;; fri) index=5 ;; sat) index=6 ;;
+          *) die "unknown weekday or day of month in schedule: $when" ;;
+        esac
+        out="        <key>Weekday</key>
         <integer>$index</integer>
-"
+" ;;
+    esac
   fi
   print -r -- "$out        <key>Hour</key>
         <integer>${hour#0}</integer>
@@ -148,16 +163,62 @@ if [ "$A5N_SCHEDULE_ENABLED" = "yes" ]; then
     say "installing scheduled jobs"
     install_launchd "com.a5n.ingest" "$REPO/scripts/daily-ingest.sh" "$(calendar_keys "$A5N_SCHEDULE_INGEST")"
     install_launchd "com.a5n.lint" "$REPO/scripts/weekly-lint.sh" "$(calendar_keys "$A5N_SCHEDULE_LINT")"
+    install_launchd "com.a5n.digest" "$REPO/scripts/digest.sh" "$(calendar_keys "$A5N_SCHEDULE_DIGEST")"
   else
     say "scheduling is macOS only for now. Add these to crontab yourself:"
     say "  ingest at $A5N_SCHEDULE_INGEST -> $REPO/scripts/daily-ingest.sh"
     say "  lint at $A5N_SCHEDULE_LINT     -> $REPO/scripts/weekly-lint.sh"
+    say "  digest at $A5N_SCHEDULE_DIGEST -> $REPO/scripts/digest.sh"
   fi
 else
   say "scheduling disabled in config, run the scripts by hand when you want them"
 fi
 
+# --- first ingest, backfill ------------------------------------------------
+# The first value moment should not wait for tomorrow's schedule. Count the
+# pending work deterministically (dry run capture plus the queue with the
+# unit cap lifted) and offer to process it right now. A5N_BACKFILL=yes|no
+# answers without a terminal, for automation and tests.
+PENDING_NEW="$(A5N_MAX_UNITS=1000000 python3 "$SCRIPT_DIR/ingest-discover.py" capture --dry-run 2>/dev/null \
+  | sed -n 's/.*summary: copied=\([0-9]*\).*/\1/p')"
+PENDING_QUEUED="$(A5N_MAX_UNITS=1000000 python3 "$SCRIPT_DIR/ingest-discover.py" queue 2>/dev/null | grep -c .)"
+PENDING=$(( ${PENDING_NEW:-0} + ${PENDING_QUEUED:-0} ))
+
+if [ "$PENDING" -gt 0 ]; then
+  say ""
+  say "$PENDING sessions are waiting to be processed. The watermark in"
+  say "config.ini controls how far back history reaches; move it earlier and"
+  say "rerun setup to pull in more."
+  ANSWER="${A5N_BACKFILL:-}"
+  if [ -z "$ANSWER" ] && [ -t 0 ]; then
+    if read -q "REPLY?Process them now? One model run per session. [y/N] "; then
+      ANSWER=yes
+    else
+      ANSWER=no
+    fi
+    say ""
+  fi
+  if [ "$ANSWER" = "yes" ]; then
+    say "running the first ingest with the unit cap lifted, this can take a while..."
+    A5N_MAX_UNITS=1000000 zsh "$REPO/scripts/daily-ingest.sh"
+    say "first ingest finished. The vault log has the details:"
+    say "  $VAULT/.a5n-logs/$(date +%F).log"
+  else
+    say "skipped. The scheduled run picks them up, or run it yourself:"
+    say "  zsh $REPO/scripts/daily-ingest.sh"
+  fi
+fi
+
+# --- the read path ---------------------------------------------------------
+say ""
+say "give your coding agents read access to the vault (run once per machine):"
+say ""
+say "  claude mcp add --scope user a5n -- python3 $REPO/scripts/a5n-mcp.py"
+say ""
+say "  # Codex, add to ~/.codex/config.toml:"
+say "  [mcp_servers.a5n]"
+say "  command = \"python3\""
+say "  args = [\"$REPO/scripts/a5n-mcp.py\"]"
+
 say ""
 say "done. Open $VAULT in Obsidian, or any editor, and start working."
-say "Run one ingest now to see it work:"
-say "  zsh $REPO/scripts/daily-ingest.sh"
