@@ -9,4 +9,4 @@ status: active
 
 Format: `## [YYYY-MM-DD] <ingest|query|lint|skip|unprocessed> | <detail>`
 
-## [{{TODAY}}] setup | namespace created, watermark {{WATERMARK}}
+## [{{TODAY}}] setup | namespace created, initial watermark {{WATERMARK}}
