@@ -113,6 +113,25 @@ The server is read only and never opens `raw/`. It does its own ranking, so
 a query adds no model cost. `setup.sh` prints these commands with the real
 paths filled in.
 
+Registering the server makes the vault reachable. It does not make agents
+look, because an available tool is not a used tool: without a standing
+instruction, agents answer history questions from guesswork instead of the
+archive. Add a block like this to each project's CLAUDE.md or AGENTS.md:
+
+```markdown
+## Knowledge vault (A5N)
+
+This project has a permanent knowledge archive: decisions, bug root causes
+and architecture notes distilled from earlier agent sessions.
+
+- When you need history, an old bug or the reason behind a decision, ask
+  the a5n MCP server first: `vault_overview` for the catalogue,
+  `vault_search` for anything specific.
+- For methods and lessons that span projects, search the pattern pages.
+- The vault is read only from here. Writing is done by the vault's own
+  automation, never from this repository.
+```
+
 ## Seeing what accumulates
 
 Once a month a plain script (no model involved) turns the vault's git history

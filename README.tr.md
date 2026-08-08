@@ -116,6 +116,25 @@ Server salt okunurdur ve `raw/` altını asla açmaz. Sıralamayı kendi yaptı�
 için bir sorgunun ekstra model maliyeti yoktur. `setup.sh` bu komutları
 gerçek yollarla doldurup basar.
 
+Server'ı kaydetmek vault'u erişilir yapar. Ajanların bakmasını sağlamaz,
+çünkü erişilebilir araç kullanılan araç değildir: kalıcı bir talimat yoksa
+ajan geçmiş sorularını arşive bakmak yerine tahminle cevaplar. Her projenin
+CLAUDE.md veya AGENTS.md dosyasına şuna benzer bir blok ekle:
+
+```markdown
+## Bilgi arşivi (A5N)
+
+Bu projenin kalıcı bir bilgi arşivi var: önceki ajan oturumlarından süzülen
+kararlar, bug kök nedenleri ve mimari notlar.
+
+- Geçmiş bağlam, eski bir bug veya bir kararın nedeni gerektiğinde önce
+  a5n MCP server'ına sor: katalog için `vault_overview`, belirli bir şey
+  için `vault_search`.
+- Projeler arası yöntem ve dersler için pattern sayfalarında ara.
+- Vault buradan salt okunurdur. Yazmayı vault'un kendi otomasyonu yapar,
+  bu repodan asla yazılmaz.
+```
+
 ## Birikeni görmek
 
 Ayda bir, düz bir script (model yok) vault'un git geçmişini `digests/`

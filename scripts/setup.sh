@@ -235,5 +235,24 @@ say "  [mcp_servers.a5n]"
 say "  command = \"python3\""
 say "  args = [\"$REPO/scripts/a5n-mcp.py\"]"
 
+# Registration alone does not make agents look things up: without a standing
+# instruction in the project's own agent file, history questions get answered
+# from guesswork instead of the archive. Same block as the README.
+say ""
+say "then tell each project's agents to use it. Add this block to the"
+say "project's CLAUDE.md or AGENTS.md:"
+say ""
+say "  ## Knowledge vault (A5N)"
+say ""
+say "  This project has a permanent knowledge archive: decisions, bug root"
+say "  causes and architecture notes distilled from earlier agent sessions."
+say ""
+say "  - When you need history, an old bug or the reason behind a decision,"
+say "    ask the a5n MCP server first: vault_overview for the catalogue,"
+say "    vault_search for anything specific."
+say "  - For methods and lessons that span projects, search the pattern pages."
+say "  - The vault is read only from here. Writing is done by the vault's own"
+say "    automation, never from this repository."
+
 say ""
 say "done. Open $VAULT in Obsidian, or any editor, and start working."
