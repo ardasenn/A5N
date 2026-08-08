@@ -61,7 +61,7 @@ STRINGS = {
         "patterns": "## New cross project patterns ({n})",
         "top": "## Most referenced pages",
         "links": "{n} links",
-        "skips": "## Sessions skipped by the capture filters: {n}",
+        "skips": "## Sessions skipped: {n} (capture filters, or a worker's reasoned skip)",
         "health": "## Health",
         "quiet": ("No sessions were processed this month. If you did work "
                   "with your agents, the pipeline may be broken: check "
@@ -79,7 +79,7 @@ STRINGS = {
         "patterns": "## Yeni cross project pattern ({n})",
         "top": "## En çok referans alan sayfalar",
         "links": "{n} link",
-        "skips": "## Yakalama süzgeçlerinin elediği oturum: {n}",
+        "skips": "## Atlanan oturum: {n} (yakalama süzgeçleri ya da işçinin gerekçeli kararı)",
         "health": "## Sağlık",
         "quiet": ("Bu ay hiç oturum işlenmedi. Ajanlarla çalıştıysan boru "
                   "hattı bozulmuş olabilir: .a5n-logs/ dizinine bak ve "
