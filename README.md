@@ -2,6 +2,9 @@
 
 Turn your AI coding agent transcripts into a knowledge base that outlives them.
 
+A5N is a numeronym for AIBrain, the way k8s abbreviates Kubernetes: first
+letter, five letters, last letter.
+
 [Türkçe](README.tr.md)
 
 ## The problem

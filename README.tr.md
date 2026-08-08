@@ -3,6 +3,9 @@
 AI kodlama ajanı transkriptlerini, onlardan uzun ömürlü bir bilgi arşivine
 çevirir.
 
+A5N, AIBrain'in numeronym'i: k8s'in Kubernetes'i kısaltması gibi, baştaki
+harf, aradaki beş harf, sondaki harf.
+
 [English](README.md)
 
 ## Sorun
