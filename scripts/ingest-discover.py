@@ -285,6 +285,11 @@ def capture(cfg, dry):
             print(f"[dry-run] would copy: {name}/{sid} "
                   f"({st.st_size // 1024}KB, {mdate})")
             counts["copied"] += 1
+            # feed the index in dry runs too, or a duplicate WITHIN the
+            # candidate set goes uncounted and setup's "N sessions are
+            # waiting" overstates the model runs it is asking to approve
+            if fl is not None:
+                index_of(name).setdefault(fl, []).append(src)
             continue
         r = subprocess.run(
             [sys.executable, os.path.join(SCRIPTS_DIR, "import-transcript.py"),
