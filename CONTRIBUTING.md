@@ -18,7 +18,8 @@ humans too. The short version:
 - **The schema template is bilingual.** Change `template/SCHEMA.en.md` and
   `template/SCHEMA.tr.md` in the same commit.
 - **Comments explain why**, ideally which failure a safety piece prevents.
-  Do not strip those comments; they are the institutional memory.
+  Do not delete those comments: they are the project's memory of what went
+  wrong before.
 - **No em dashes in prose.** Commas, colons and parentheses do the job.
 
 ## Testing a change

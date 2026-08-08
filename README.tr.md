@@ -28,9 +28,9 @@ ve tamamen isteğe bağlı. Hiçbir şey senin diskinin dışına çıkmaz.
 
 ![A5N nasıl çalışır](assets/architecture.svg)
 
-Sistemin asıl kazandıran parçası `patterns/`. Bir ders onu üreten projenin
-ötesinde de geçerliyse kendi sayfasını alır ve bir sonraki proje onu bulur. Bir
-not yığını ile zamanla biriken bir şey arasındaki fark budur.
+En değerli klasör `patterns/`. Bir ders tek projeye bağlı değilse orada kendi
+sayfasını alır ve bir sonraki projen onu hazır bulur. Not yığınını zamanla
+değeri artan bilgiye çeviren şey budur.
 
 Uydurma dört sayfalık örnek çıktı için [example/](example/) klasörüne, sistemin
 asıl amacı için
@@ -39,11 +39,11 @@ bakın.
 
 ## Kurulum
 
-macOS veya Linux, Python 3.9 ya da üstü, git, ve gözetimsiz koşular için Claude
-Code CLI ile Codex CLI'dan biri gerekir. İşçileri hangisinin koşturacağı,
-hangi modelle ve hangi reasoning effort'la koşacağı `config.ini` içindeki
-`[runner]` bölümünden seçilir; örnek config kopyala yapıştır değer listeleri
-taşır, böylece yazım hatası zamanlanmış koşuya ulaşamaz.
+macOS veya Linux, Python 3.9 ya da üstü, git, ve gözetimsiz koşular için
+Claude Code CLI ile Codex CLI'dan biri gerekir. İşçileri hangisinin, hangi
+modelle ve hangi reasoning effort'la koşturacağını `config.ini` içindeki
+`[runner]` bölümünden seçersin. Örnek config geçerli değerleri kopyalanmaya
+hazır listeler, yazım hatası zamanlanmış koşuyu bozamaz.
 
 ```bash
 git clone https://github.com/ardasenn/A5N.git
@@ -96,10 +96,10 @@ zamanlanmış koşu çakışamaz.
 
 ## Geri okumak
 
-Vault ancak içinden okunan kadar değerlidir; bu yüzden A5N, MCP destekli her
-ajana okuma erişimi veren bir MCP server ile gelir: sayfalarda sıralı arama,
-vault genel görünümü ve tam sayfa okuma. Makine başına bir kez kaydet, her
-ajan oturumu geçmişini tekrarlamadan önce vault'a danışabilsin:
+Sayfa yazmak işin yarısı: ajanların onları okuyabilmesi de gerek. A5N bunun
+için bir MCP server ile gelir; MCP destekli her ajan vault'ta arama yapabilir,
+genel görünümü alabilir ve sayfaları okuyabilir. Makine başına bir kez
+kaydet, her ajan oturumu geçmişini tekrarlamadan önce vault'a baksın:
 
 ```bash
 claude mcp add --scope user a5n -- python3 "$(pwd)/scripts/a5n-mcp.py"
@@ -112,54 +112,52 @@ command = "python3"
 args = ["/path/to/A5N/scripts/a5n-mcp.py"]
 ```
 
-Server salt okunurdur, `raw/` altını asla açmaz ve sıralamayı kendi yapar;
-yani bir sorgu, çağıran ajanın zaten harcadığının ötesinde hiçbir şeye mal
-olmaz. `setup.sh` bu komutları gerçek yollarla doldurup basar.
+Server salt okunurdur ve `raw/` altını asla açmaz. Sıralamayı kendi yaptığı
+için bir sorgunun ekstra model maliyeti yoktur. `setup.sh` bu komutları
+gerçek yollarla doldurup basar.
 
 ## Birikeni görmek
 
-Ayda bir, deterministik bir script, model yok, vault'un git geçmişini
-`digests/` altında tek sayfaya çevirir: proje başına işlenen oturumlar,
-açılan ve güncellenen sayfalar, yeni pattern'lar, en çok referans alan
-sayfalar, ve hiçbir şey işlenmeden geçen ayı yüksek sesle söyleyen bir sağlık
-satırı. O son madde önemli: sessizce bozulan bir boru hattı, biri farkı
-görünür kılana kadar sakin bir aydan ayırt edilemez.
+Ayda bir, düz bir script (model yok) vault'un git geçmişini `digests/`
+altında tek sayfaya çevirir: proje başına işlenen oturumlar, açılan ve
+güncellenen sayfalar, yeni pattern'lar, en çok referans alan sayfalar ve bir
+sağlık satırı. Koca ay hiçbir şey işlenmeden geçtiyse özet bunu açıkça
+söyler; o satır olmasa bozulan sistemi sakin aydan ayırt edemezsin.
 
 ```bash
 zsh scripts/digest.sh            # geçen ay
 zsh scripts/digest.sh 2026-07    # herhangi bir ay
 ```
 
-Kurulum anında bekleyen oturumlar varsa A5N, ilk değer anını yarınki
-zamanlanmış koşuya bırakmak yerine birikimi hemen işlemeyi önerir.
-`config.ini` içindeki `watermark` o geçmişin ne kadar geriye uzanacağını
-belirler.
+Kurulum anında bekleyen oturumlar varsa A5N onları hemen işlemeyi önerir;
+ilk sayfalarını yarınki zamanlanmış koşuyu beklemeden dakikalar içinde
+görürsün. `config.ini` içindeki `watermark` o geçmişin ne kadar geriye
+uzanacağını belirler.
 
 ## Neden bozulmuyor
 
-Gözetimsiz görevler, aksi tasarlanmadıkça sessizce başarısız olur. Mimarinin
-buna cevabı tek ilke: orkestrasyon deterministik script'te, model sadece
-yaprakta çalışır.
+Gözetimsiz görevler, aksi tasarlanmadıkça sessizce başarısız olur. A5N'in
+cevabı tek ilke: boru hattını script'ler yönetir, model sadece oturum okur
+ve sayfa yazar.
 
-- **Keşfe model hiç karışmaz.** Bir Python script'i transkript klasörlerini
-  tarar, adayları eler ve tekilleştirir, geçenleri vault'a kopyalar. Zaman
-  baskısı olan tek iş budur, çünkü ajanlar transkriptleri bir süre sonra
-  siler, ve bu işin hiçbir parçası halüsinasyon göremez.
-- **Oturum başına bir işçi, eseriyle doğrulanır.** Kuyruktaki her oturum kendi
-  headless ajan koşusunu alır. Koşu bitince bir script diske gerçekten ne
-  yazıldığına bakar: değişen yollar şemanın içinde mi, bir sayfa ya da
-  gerekçeli skip satırı oluşmuş mu, frontmatter tam mı. İşçinin kendi sözüne
-  asla güvenilmez. Önceki tasarım çıktıda sonuç imzası grep'liyordu ve imzanın
-  etrafındaki tek bir backtick bir keresinde işlenmiş on iki oturumu geçersiz
-  kıldı.
-- **Birimler bağımsız commit'lenir.** Doğrulamayı geçen birim anında
-  commit'lenir. Kalan birim tek başına geri alınır, kuyrukta kalır ve yarın
-  yeniden denenir; kardeşlerinin işi çoktan güvendedir. Kuyruğun ayrıca bir
-  kayıt dosyasına ihtiyacı yoktur, çünkü vault'un kendisi state'tir:
-  sayfalarda izi olmayan bir ham transkript tanım gereği hâlâ kuyruktadır.
-- **Reddedilen birim bir şans daha alır.** Doğrulamanın red sebepleri prompt'a
-  eklenir ve işçi bir kez daha koşar, böylece sıradan uyum değişkenliği koşu
-  içinde kapanır, kuyruk günlerce aynı birimi çiğnemez.
+- **Oturum bulma işine model hiç karışmaz.** Bir Python script'i transkript
+  klasörlerini tarar, adayları eler, kopyaları ayıklar, kalanları vault'a
+  kopyalar. Bu kısım halüsinasyon göremez ve işin tek acele kısmı da budur:
+  ajanlar eski transkriptleri sildiği için kopya zamanında alınmalıdır.
+- **Oturum başına bir işçi, dosyalarıyla yargılanır.** Kuyruktaki her oturum
+  kendi headless ajan koşusunu alır. Koşu bitince bir script diske gerçekten
+  ne yazıldığına bakar: değişen yollar izinli mi, bir sayfa ya da gerekçeli
+  skip satırı oluşmuş mu, frontmatter tam mı. İşçinin kendi işi hakkında
+  söylediklerine asla güvenilmez. Önceki tasarım çıktıdaki bir sonuç
+  satırına güveniyordu ve tek bir backtick yüzünden işlenmiş on iki oturum
+  bir kerede çöpe gitmişti.
+- **Her oturum kendi başına commit'lenir.** Geçen birim anında commit'lenir.
+  Kalan birim tek başına geri alınır ve yarın yeniden denenir; diğerlerinin
+  işi çoktan güvendedir. Ayrı bir kayıt dosyası yoktur: sayfalarda izi
+  olmayan ham transkript, tanım gereği hâlâ kuyruktadır.
+- **Reddedilen birim bir şans daha alır.** Red sebepleri prompt'a eklenir ve
+  işçi bir kez daha koşar; küçük bir hata günlerce tekrarlamak yerine aynı
+  koşuda düzelir.
 - Vault bir git repo'sudur ve işçi başlamadan önce ağaç her zaman temizdir,
   dolayısıyla geri alma yalnızca o işçinin çıktısına dokunabilir.
 - Tek kilit dosyasını bütün görevler paylaşır, ingest, lint ve digest,
@@ -168,10 +166,10 @@ yaprakta çalışır.
   sonraki tüm koşuları sessizce yutar.
 - Watchdog, birim başına duvar saatini aşan işçiyi keser. Bu bir iş sınırı
   değil, sadece sonsuza asılmaya karşı bir koruma.
-- Atlama asla sessiz olmaz. İçeriği yüzünden elenen her oturum, küçük ya da
-  kopya, proje log'una deterministik bir satır düşürür; modelden rica
-  edilmez, script yazar. İki istisna bilinçlidir: watermark elemesi zaten
-  senin ayarındır, fazla taze oturum ise sadece yarını bekler.
+- Atlama asla sessiz olmaz. Küçük ya da kopya olduğu için elenen her oturum
+  için satırı script'in kendisi proje log'una yazar, modelden rica edilmez.
+  İki durum bilerek satır almaz: senin ayarladığın watermark'tan eski
+  oturumlar ve hâlâ kullanımda olan oturumlar, onlar sadece yarını bekler.
 - Yapılacak iş olmayan günde model hiç çağrılmaz. Sessizlik başarıdır,
   bildirim sadece hatada düşer.
 

@@ -30,8 +30,8 @@
 
   <!-- layer 1 -->
   <rect class="layer" x="130" y="106" width="520" height="72" rx="8"/>
-  <text class="tl" x="150" y="126">LAYER 1 · CAPTURE — PURE PYTHON, NO MODEL</text>
-  <text class="t" x="150" y="146">discover → filter (watermark · freshness · size) → dedup by content</text>
+  <text class="tl" x="150" y="126">LAYER 1 · CAPTURE (PURE PYTHON, NO MODEL)</text>
+  <text class="t" x="150" y="146">find sessions, filter them (too old, still running, too small), drop duplicates</text>
   <text class="ts" x="150" y="164">every drop writes a deterministic skip line to the project log</text>
 
   <path class="edge" d="M 390 178 L 390 200"/>
@@ -39,15 +39,15 @@
   <!-- raw store -->
   <rect class="store" x="180" y="202" width="420" height="46" rx="8"/>
   <text class="tb" x="390" y="221" text-anchor="middle">raw/sessions/*.jsonl</text>
-  <text class="ts" x="390" y="238" text-anchor="middle">permanent filtered copies, committed — the vault keeps its own</text>
+  <text class="ts" x="390" y="238" text-anchor="middle">permanent filtered copies, saved with git (agents delete theirs, yours stays)</text>
 
   <path class="edge" d="M 390 248 L 390 270"/>
 
   <!-- layer 2 -->
   <rect class="layer" x="130" y="272" width="520" height="72" rx="8"/>
-  <text class="tl" x="150" y="292">LAYER 2 · ONE HEADLESS WORKER PER SESSION — claude | codex</text>
+  <text class="tl" x="150" y="292">LAYER 2 · ONE HEADLESS WORKER PER SESSION (claude or codex)</text>
   <text class="t" x="150" y="312">reads the transcript (condensed to a skeleton when huge)</text>
-  <text class="ts" x="150" y="330">writes linked pages, nothing else — no discovery, no commits, no subagents</text>
+  <text class="ts" x="150" y="330">writes linked pages and nothing else: no discovery, no commits, no subagents</text>
 
   <path class="edge" d="M 390 344 L 390 366"/>
 
@@ -60,15 +60,15 @@
 
   <!-- verify -->
   <rect class="layer" x="130" y="438" width="520" height="64" rx="8"/>
-  <text class="tl" x="150" y="458">VERIFY — THE ARTIFACT, NEVER A CLAIM</text>
-  <text class="t" x="150" y="478">schema paths · id trace · frontmatter — pass ⇒ that unit commits immediately</text>
-  <text class="ts" x="150" y="495">the worker's own words are never trusted</text>
+  <text class="tl" x="150" y="458">VERIFY · TRUST THE FILES, NOT THE MODEL'S WORDS</text>
+  <text class="t" x="150" y="478">checks the files on disk: allowed paths, id trace, frontmatter. Pass: commit at once</text>
+  <text class="ts" x="150" y="495">a unit that fails is rolled back alone and tried again tomorrow</text>
 
   <!-- retry loop -->
   <path class="loop" d="M 650 470 C 756 470 756 300 655 300"/>
-  <text class="ts" x="697" y="376" text-anchor="middle">fail ⇒ roll back</text>
-  <text class="ts" x="697" y="391" text-anchor="middle">that unit only,</text>
-  <text class="ts" x="697" y="406" text-anchor="middle">retry tomorrow</text>
+  <text class="ts" x="697" y="376" text-anchor="middle">on failure:</text>
+  <text class="ts" x="697" y="391" text-anchor="middle">roll back this</text>
+  <text class="ts" x="697" y="406" text-anchor="middle">unit, retry</text>
 
   <!-- bottom band -->
   <path class="edge" d="M 390 502 L 390 524"/>
@@ -87,5 +87,5 @@
   <text class="ts" x="634" y="566" text-anchor="middle">overview · search · page, read only</text>
   <text class="ts" x="634" y="581" text-anchor="middle">any agent consults the vault</text>
 
-  <text class="ts" x="390" y="632" text-anchor="middle">orchestration is deterministic script — the model only works at the leaf, and success is measured by the artifact</text>
+  <text class="ts" x="390" y="632" text-anchor="middle">Scripts run the pipeline. The model only reads sessions and writes pages. Success is judged by the files on disk.</text>
 </svg>

@@ -26,10 +26,9 @@ browse it and is entirely optional. Nothing is stored anywhere but your disk.
 
 ![How A5N works](assets/architecture.svg)
 
-The part that pays for the whole thing is `patterns/`. When a lesson holds
-beyond the project that produced it, it gets its own page, and the next project
-finds it. That is the difference between a pile of notes and something that
-compounds.
+The most valuable folder is `patterns/`. When a lesson is not tied to one
+project, it gets its own page there, and your next project finds it. That is
+what turns a pile of notes into knowledge that keeps growing in value.
 
 See [example/](example/) for four pages of invented output, and
 [the pattern page](example/patterns-example/retry-without-a-budget-amplifies-an-outage.md)
@@ -37,11 +36,11 @@ for what the system is actually for.
 
 ## Install
 
-Requires macOS or Linux, Python 3.9 or newer, git, and one of the Claude Code
-CLI or the Codex CLI for the unattended runs. Which one drives the workers,
-which model it uses and at what reasoning effort are all picked in the
-`[runner]` section of `config.ini`, and the example config carries copy paste
-value lists so a typo cannot reach a scheduled run.
+Requires macOS or Linux, Python 3.9 or newer, git, and either the Claude Code
+CLI or the Codex CLI for the unattended runs. You pick which one runs the
+workers, with which model and at what reasoning effort, in the `[runner]`
+section of `config.ini`. The example config lists the valid values ready to
+copy, so a typo cannot break a scheduled run.
 
 ```bash
 git clone https://github.com/ardasenn/A5N.git
@@ -94,10 +93,10 @@ a scheduled one cannot collide.
 
 ## Reading it back
 
-The vault is only worth what gets read out of it, so A5N ships an MCP server
-that gives any MCP capable agent read access: ranked search over the pages, a
-vault overview, and full page reads. Register it once per machine and every
-agent session can consult the vault before repeating your history:
+Writing pages is only half the job: your agents also need to read them. A5N
+ships an MCP server that gives any MCP capable agent read access to the vault,
+with search, an overview, and full page reads. Register it once per machine
+and every agent session can check the vault before repeating your history:
 
 ```bash
 claude mcp add --scope user a5n -- python3 "$(pwd)/scripts/a5n-mcp.py"
@@ -110,55 +109,52 @@ command = "python3"
 args = ["/path/to/A5N/scripts/a5n-mcp.py"]
 ```
 
-The server is read only, never opens `raw/`, and does its own ranking, so a
-query costs nothing beyond what the calling agent was already spending.
-`setup.sh` prints these commands with the real paths filled in.
+The server is read only and never opens `raw/`. It does its own ranking, so
+a query adds no model cost. `setup.sh` prints these commands with the real
+paths filled in.
 
 ## Seeing what accumulates
 
-Once a month a deterministic script, no model involved, turns the vault's git
-history into one page under `digests/`: sessions processed per project, pages
-created and updated, new patterns, the most referenced pages, and a health
-line that says out loud when a month went by with nothing processed. That last
-one matters: a pipeline that fails in silence looks identical to a quiet
-month until something makes the difference visible.
+Once a month a plain script (no model involved) turns the vault's git history
+into one page under `digests/`: sessions processed per project, pages created
+and updated, new patterns, the most referenced pages, and a health line. If a
+whole month went by with nothing processed, the digest says so, because
+without that line you cannot tell a broken pipeline from a quiet month.
 
 ```bash
 zsh scripts/digest.sh            # previous month
 zsh scripts/digest.sh 2026-07    # any month
 ```
 
-At setup time, if sessions are already waiting, A5N offers to process the
-backlog immediately instead of leaving the first value moment to tomorrow's
-schedule. The `watermark` in `config.ini` controls how far back that history
-reaches.
+At setup time, if sessions are already waiting, A5N offers to process them
+right away, so you see your first pages within minutes instead of waiting for
+tomorrow's schedule. The `watermark` in `config.ini` controls how far back
+that history reaches.
 
 ## How it holds together
 
-Unattended jobs fail quietly unless you design against it. The architecture
-answers that with one principle: orchestration is deterministic script, the
-model only works at the leaf.
+Unattended jobs fail quietly unless you design against it. A5N's answer is
+one principle: scripts run the pipeline, the model only reads sessions and
+writes pages.
 
-- **Discovery never involves a model.** A Python script scans the transcript
-  folders, filters and dedups candidates, and copies survivors into the vault.
-  This is the only time critical work, since agents delete transcripts after a
-  while, and none of it can hallucinate.
-- **One worker per session, verified by its artifact.** Each queued session
-  gets its own headless agent run. When it ends, a script inspects what was
-  actually written to disk: are the changed paths inside the schema, did a
-  page or a reasoned skip line appear, is the frontmatter complete. The
-  worker's own words are never trusted. An earlier design grepped the output
-  for a result signature, and one backtick around it once voided twelve
-  processed sessions.
-- **Units commit independently.** A unit that passes verification is committed
-  on the spot. A unit that fails is rolled back alone, stays in the queue, and
-  retries tomorrow; its siblings' work is already safe. The queue needs no
-  bookkeeping file because the vault itself is the state: a raw transcript
-  with no trace in the pages is, by definition, still queued.
-- **A rejected unit gets one more chance.** The verification reasons are
-  appended to the prompt and the worker runs again, so ordinary compliance
-  variance closes within the run instead of the queue chewing on the same
-  unit for days.
+- **Finding sessions never involves a model.** A Python script scans the
+  transcript folders, filters the candidates, drops duplicates, and copies the
+  rest into the vault. This part cannot hallucinate, and it is the only urgent
+  part: agents delete old transcripts, so the copy must happen in time.
+- **One worker per session, judged by its files.** Each queued session gets
+  its own headless agent run. When it ends, a script looks at what actually
+  landed on disk: are the changed paths allowed, did a page or a reasoned
+  skip line appear, is the frontmatter complete. What the worker says about
+  its own work is never trusted. An earlier design trusted a result line in
+  the output, and a single stray backtick once threw away twelve processed
+  sessions.
+- **Each session commits on its own.** A unit that passes is committed on the
+  spot. A unit that fails is rolled back alone and retried tomorrow; the other
+  units' work is already safe. There is no bookkeeping file: a raw transcript
+  that has no trace in the pages is still in the queue, by definition.
+- **A rejected unit gets one more chance.** The rejection reasons are added
+  to the prompt and the worker runs once more, so a small mistake is fixed
+  within the same run instead of repeating for days.
 - The vault is a git repository and the tree is always clean before a worker
   starts, so a rollback can only ever touch that one worker's output.
 - One lock file is shared by every job, ingest, lint and digest, so none can
@@ -167,11 +163,10 @@ model only works at the leaf.
   every later run.
 - A watchdog kills a worker that exceeds its per unit wall clock. Not a work
   limit, only a guard against hanging forever.
-- Skipping is never silent. Every session dropped on its merits, too small or
-  a duplicate, gets a deterministic line in the project log, written by the
-  script rather than requested from the model. The two exceptions are
-  deliberate: watermark drops are configured, and a too fresh session simply
-  waits for tomorrow.
+- Skipping is never silent. When a session is dropped for being too small or
+  a duplicate, the script itself writes a line saying so in the project log.
+  Two cases write no line on purpose: sessions older than your configured
+  watermark, and sessions still in use, which simply wait for tomorrow.
 - On a day with nothing to do, the model is never invoked. Silence is success,
   a notification fires only on failure.
 
