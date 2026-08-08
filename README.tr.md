@@ -26,6 +26,8 @@ denetler.
 Çıktı bir git repo'sundaki düz markdown. Obsidian gezinmek için güzel bir yol
 ve tamamen isteğe bağlı. Hiçbir şey senin diskinin dışına çıkmaz.
 
+![A5N nasıl çalışır](assets/architecture.svg)
+
 Sistemin asıl kazandıran parçası `patterns/`. Bir ders onu üreten projenin
 ötesinde de geçerliyse kendi sayfasını alır ve bir sonraki proje onu bulur. Bir
 not yığını ile zamanla biriken bir şey arasındaki fark budur.

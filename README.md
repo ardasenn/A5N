@@ -24,6 +24,8 @@ machinery audits that wiki for contradictions, dead links and schema drift.
 The output is plain markdown in a git repository. Obsidian is a nice way to
 browse it and is entirely optional. Nothing is stored anywhere but your disk.
 
+![How A5N works](assets/architecture.svg)
+
 The part that pays for the whole thing is `patterns/`. When a lesson holds
 beyond the project that produced it, it gets its own page, and the next project
 finds it. That is the difference between a pile of notes and something that
