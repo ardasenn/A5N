@@ -249,9 +249,12 @@ def capture(cfg, dry):
     for proj, src, sid, target in iter_candidates(cfg):
         name = proj["name"]
         st = os.stat(src)
-        mdate = datetime.date.fromtimestamp(st.st_mtime).isoformat()
 
-        if proj["watermark"] and mdate < proj["watermark"]:
+        # The watermark compares the session's own date, not the file's
+        # mtime: a copy or a sync refreshes mtime, and a June session must
+        # not slip past a July watermark for having a young file.
+        sdate = session_date(src)
+        if proj["watermark"] and sdate < proj["watermark"]:
             counts["watermark"] += 1
             continue
         if now - st.st_mtime < fresh_sec:
@@ -306,7 +309,7 @@ def capture(cfg, dry):
 
         if dry:
             print(f"[dry-run] would copy: {name}/{sid} "
-                  f"({st.st_size // 1024}KB, {mdate})")
+                  f"({st.st_size // 1024}KB, {sdate})")
             counts["copied"] += 1
             # feed the index in dry runs too, or a duplicate WITHIN the
             # candidate set goes uncounted and setup's "N sessions are
