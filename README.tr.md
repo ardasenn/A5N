@@ -37,6 +37,37 @@ asıl amacı için
 [pattern sayfasına](example/patterns-example/retry-without-a-budget-amplifies-an-outage.md)
 bakın.
 
+## Vault neye benziyor
+
+Düz klasörler, düz markdown. Yapılandırdığın her proje kendi namespace'ini
+alır, kökte de birkaç ortak klasör yaşar:
+
+```
+vault/
+├── <proje>/               yapılandırılan her proje için bir namespace
+│   ├── sources/sessions/  işlenen her oturuma bir sayfa: ne oldu, neden
+│   ├── decisions/         verilen kararlar, arkasındaki gerekçeyle
+│   ├── bugs/              bulmak için bir kez bedel ödediğin kök nedenler
+│   ├── entities/          hareketli parçalar: servisler, araçlar, kütüphaneler
+│   ├── concepts/          kendi açıklamasını hak eden alan kavramları
+│   ├── syntheses/         birden çok oturumdan dikilen büyük yazılar
+│   ├── archive/           doğruluğu geçmiş sayfalar, kayıt için saklanır
+│   ├── raw/               orijinal transcript'ler, bayt bayt, asla düzenlenmez
+│   └── log.md             olay başına bir satır: işlendi, atlandı, lint edildi
+├── patterns/              tek projeye sığmayan dersler
+├── chess-moves/           ileriye bakan strateji oturumları
+├── digests/               aylık özetler
+└── GOALS.md               nereye gittiğin, kendi cümlelerinle
+```
+
+Vault'taki hemen her şey geriye bakar: olmuş biteni ve nedenini kaydeder.
+`chess-moves/` ters yöne bakan tek klasördür. Bir chess moves sayfası,
+ajanınla yaptığın bir strateji oturumunun yazılı izidir: proje nerede
+duruyor, masada hangi seçenekler var, sırada ne denemeye karar verdin;
+oturum başına tarihli bir dosya. Sen sesli düşünürken ajan wiki'yi kanıt
+olarak okur, vardığın sonuç da `GOALS.md`'ye yazılır. Wiki geçmişini
+hatırlar, chess moves geleceğini gösterir, `GOALS.md` güncel cevabı tutar.
+
 ## Kurulum
 
 macOS veya Linux, Python 3.9 ya da üstü, git, ve gözetimsiz koşular için

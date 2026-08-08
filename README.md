@@ -34,6 +34,38 @@ See [example/](example/) for four pages of invented output, and
 [the pattern page](example/patterns-example/retry-without-a-budget-amplifies-an-outage.md)
 for what the system is actually for.
 
+## What the vault looks like
+
+Plain folders, plain markdown. Every project you configure gets its own
+namespace, and a handful of folders live at the root:
+
+```
+vault/
+├── <project>/             one namespace per configured project
+│   ├── sources/sessions/  one page per processed session: what happened, why
+│   ├── decisions/         choices made, with the reasoning behind them
+│   ├── bugs/              root causes you already paid once to find
+│   ├── entities/          the moving parts: services, tools, libraries
+│   ├── concepts/          domain ideas that need their own explanation
+│   ├── syntheses/         bigger write-ups stitched from several sessions
+│   ├── archive/           pages that stopped being true, kept for the record
+│   ├── raw/               original transcripts, byte for byte, never edited
+│   └── log.md             one line per event: ingested, skipped, linted
+├── patterns/              lessons that outgrew one project
+├── chess-moves/           strategy sessions, looking forward
+├── digests/               the monthly summaries
+└── GOALS.md               where you are headed, in your own words
+```
+
+Almost everything in the vault looks backwards: it records what already
+happened and why. `chess-moves/` is the one folder that looks the other
+way. A chess moves page is the written trace of a strategy session with
+your agent: where the project stands, which options are on the table, what
+you decide to try next, one dated file per sitting. The agent reads the
+wiki as evidence while you think out loud together, and the conclusion you
+land on goes into `GOALS.md`. The wiki remembers your past, chess moves
+point at your future, and `GOALS.md` holds the current answer.
+
 ## Install
 
 Requires macOS or Linux, Python 3.9 or newer, git, and either the Claude Code
