@@ -22,11 +22,15 @@ Checks, all mechanical:
     raw/ is NOT in the list: the worker may never write there (hard rule 1).
     An out of schema path is a rejection, so namespace isolation and "no
     scratch files in the vault" are now mechanical guarantees.
- 3. the session id appears in <project>/sources/sessions/*.md or in
-    <project>/log.md: a page was written OR a reasoned skip was recorded
- 4. every sources page changed in this run that carries the id has complete
-    frontmatter (title/tags/source/date/status) and its source: field points
-    at the raw path
+ 3. a TRACE was left, in exactly one of the two shapes the queue accepts
+    (the contract lives in ingest-discover.py's module docstring): a
+    sources/sessions page containing the full raw path
+    "raw/sessions/<id>.jsonl", or a "skip | <id>" line in <project>/log.md.
+    A bare id mentioned anywhere else is NOT a trace: the old
+    substring-anywhere test let mere log notes dequeue sessions twice.
+ 4. every sources page changed in this run that carries the raw path has
+    complete frontmatter (title/tags/source/date/status) and its source:
+    field points at the raw path
 """
 import glob
 import os
@@ -95,14 +99,19 @@ def main():
         with open(log_path, encoding="utf-8", errors="replace") as f:
             log_text = f.read()
 
+    raw_ref = f"raw/sessions/{sid}.jsonl"
     pages_with_id = []
     for sp in src_pages:
         with open(sp, encoding="utf-8", errors="replace") as f:
-            if sid in f.read():
+            if raw_ref in f.read():
                 pages_with_id.append(sp)
-    if not pages_with_id and sid not in log_text:
-        problems.append(f"no trace of the id: {sid} appears neither in "
-                        f"sources/sessions pages nor in {proj}/log.md")
+    skip_trace = re.search(rf"skip \| {re.escape(sid)}\b", log_text)
+    if not pages_with_id and not skip_trace:
+        problems.append(
+            f"no trace: no sources page contains '{raw_ref}' and "
+            f"{proj}/log.md has no 'skip | {sid}' line. Write the source "
+            f"page with that exact raw path in its source: field, or the "
+            f"skip line with the id IN FULL.")
 
     # frontmatter integrity of pages that carry the id AND changed in this run
     dirt_set = set(dirt)

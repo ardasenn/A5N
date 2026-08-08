@@ -11,11 +11,22 @@ modes can exist in a Python script.
 
 State is not kept in a separate file, THE VAULT ITSELF IS THE STATE:
     captured  = <project>/raw/sessions/<id>.jsonl exists
-    processed = the id appears in some .md outside raw/ in that namespace
-                (a source page, or a skip line in log.md)
+    processed = a TRACE exists, and a trace is exactly one of two things:
+                  * a sources/sessions page containing the full raw path
+                    "raw/sessions/<id>.jsonl" (its source: field, or a
+                    ## Sources entry on a continuation page)
+                  * a "skip | <id>" line in <project>/log.md
 
 A raw file whose id has no trace is by definition still queued, so a failed
 unit retries tomorrow with no bookkeeping at all.
+
+The trace definition is deliberately this narrow. The first version used
+"the id appears in any .md in the namespace", and that substring test
+produced the same bug twice in one day: first the dedup skip line quoted
+the KEPT file's full name and dequeued it, then the superset note carried
+the CANDIDATE's own id and dequeued that. A bare id mentioned in prose is
+not a trace and can never dequeue anything again; only the two shapes
+above count, and ingest-verify.py accepts exactly the same two shapes.
 
 Usage:
     python3 scripts/ingest-discover.py capture [--dry-run]
@@ -172,16 +183,28 @@ def iter_candidates(cfg):
                     yield proj, src, os.path.splitext(target)[0], target
 
 
-def namespace_text(vault, proj):
-    """Every .md in the namespace outside raw/, as one string."""
+def trace_text(vault, proj):
+    """(sources_text, log_text): the only two places a trace may live."""
     chunks = []
-    for dirpath, dirnames, filenames in os.walk(os.path.join(vault, proj)):
-        dirnames[:] = [d for d in dirnames if d != "raw"]
-        for fn in filenames:
+    sdir = os.path.join(vault, proj, "sources", "sessions")
+    if os.path.isdir(sdir):
+        for fn in sorted(os.listdir(sdir)):
             if fn.endswith(".md"):
-                with open(os.path.join(dirpath, fn), errors="replace") as f:
+                with open(os.path.join(sdir, fn), errors="replace") as f:
                     chunks.append(f.read())
-    return "\n".join(chunks)
+    log_text = ""
+    log_path = os.path.join(vault, proj, "log.md")
+    if os.path.isfile(log_path):
+        with open(log_path, errors="replace") as f:
+            log_text = f.read()
+    return "\n".join(chunks), log_text
+
+
+def is_processed(traces, sid):
+    sources_text, log_text = traces
+    if f"raw/sessions/{sid}.jsonl" in sources_text:
+        return True
+    return re.search(rf"skip \| {re.escape(sid)}\b", log_text) is not None
 
 
 def append_skip(vault, proj, line, dry):
@@ -202,7 +225,7 @@ def capture(cfg, dry):
               "small": 0, "redundant": 0, "larger": 0, "divergent": 0}
 
     # project -> {first line: [raw path, ...]}, built lazily
-    fl_index, ns_cache = {}, {}
+    fl_index, trace_cache = {}, {}
 
     def index_of(proj):
         if proj not in fl_index:
@@ -218,10 +241,10 @@ def capture(cfg, dry):
             fl_index[proj] = idx
         return fl_index[proj]
 
-    def ns_of(proj):
-        if proj not in ns_cache:
-            ns_cache[proj] = namespace_text(vault, proj)
-        return ns_cache[proj]
+    def traces_of(proj):
+        if proj not in trace_cache:
+            trace_cache[proj] = trace_text(vault, proj)
+        return trace_cache[proj]
 
     for proj, src, sid, target in iter_candidates(cfg):
         name = proj["name"]
@@ -237,7 +260,7 @@ def capture(cfg, dry):
             continue
 
         dst = os.path.join(vault, name, "raw", "sessions", target)
-        if os.path.exists(dst) or sid in ns_of(name):
+        if os.path.exists(dst) or is_processed(traces_of(name), sid):
             counts["present"] += 1
             continue
         if st.st_size < min_bytes:
@@ -245,7 +268,7 @@ def capture(cfg, dry):
             append_skip(vault, name,
                         f"skip | {sid} (small session, {st.st_size // 1024}KB, "
                         f"raw not copied)", dry)
-            ns_cache.pop(name, None)
+            trace_cache.pop(name, None)
             continue
 
         fl = first_kept_line(src)
@@ -268,7 +291,7 @@ def capture(cfg, dry):
                 append_skip(vault, name,
                             f"skip | {sid} contained in {other}, raw not copied",
                             dry)
-                ns_cache.pop(name, None)
+                trace_cache.pop(name, None)
                 continue
             if any(r == "superset" for r, _ in rels):
                 counts["larger"] += 1
@@ -316,12 +339,12 @@ def queue(cfg):
         rdir = os.path.join(vault, name, "raw", "sessions")
         if not os.path.isdir(rdir):
             continue
-        ns = namespace_text(vault, name)
+        traces = trace_text(vault, name)
         for fn in sorted(os.listdir(rdir)):
             if not fn.endswith(".jsonl"):
                 continue
             sid = os.path.splitext(fn)[0]
-            if sid in ns:
+            if is_processed(traces, sid):
                 continue
             p = os.path.join(rdir, fn)
             units.append((session_date(p), name, sid, p, os.path.getsize(p)))

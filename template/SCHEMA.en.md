@@ -200,8 +200,11 @@ script guarantee now. The result is one commit: `chore: raw capture`.
 
 State is not kept in a separate file, THE VAULT ITSELF IS THE STATE:
 - captured = `<project>/raw/sessions/<id>.jsonl` exists
-- processed = the id appears in some .md outside raw/ in the namespace (a
-  source page or a log.md skip line). A raw with no trace is queued.
+- processed = a TRACE exists, and only two shapes count: a sources page
+  containing the full raw path `raw/sessions/<id>.jsonl`, or a
+  `skip | <id>` line in `<project>/log.md`. A bare id mentioned in prose
+  is NOT a trace, so a note can never silently dequeue a session. A raw
+  with no trace is queued.
 
 **Layer 2, processing (one model worker per session).** `ingest-discover.py
 queue` lists the unprocessed raws (oldest first, per run cap in config); the

@@ -197,8 +197,11 @@ tek commit: `chore: raw capture`.
 
 State ayrı dosyada tutulmaz, VAULT'UN KENDİSİ STATE'TİR:
 - yakalandı = `<proje>/raw/sessions/<id>.jsonl` mevcut
-- işlendi = kimlik, namespace'te raw/ dışında bir .md'de geçiyor (kaynak
-  sayfa ya da log.md skip satırı). Raw'ı olup izi olmayan oturum kuyruktadır.
+- işlendi = İZ var demektir ve yalnızca iki biçim iz sayılır: tam ham yolu
+  (`raw/sessions/<id>.jsonl`) içeren bir kaynak sayfası, ya da
+  `<proje>/log.md` içinde `skip | <id>` satırı. Düz metinde geçen çıplak
+  bir kimlik iz DEĞİLDİR, yani bir not hiçbir oturumu sessizce kuyruktan
+  düşüremez. Ham dosyası olup izi olmayan oturum kuyruktadır.
 
 **Katman 2, işleme (oturum başına bir model işçisi).** `ingest-discover.py
 queue` işlenmemişleri listeler (eski önce, koşu başına tavan config'de);
