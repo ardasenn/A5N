@@ -27,6 +27,8 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 
 notify() {
   # $1 = message, $2 = empty for info or "fail"
+  # stdout too: a hand run should say what happened without opening the log.
+  print -r -- "$1"
   log "${2:+FAILED: }$1"
   [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
   if [ "$(uname)" = "Darwin" ]; then
