@@ -230,11 +230,16 @@ leave no out of schema path. Every other rule still applies."
     rm -f "$WATCHDOG_FLAG"
     start_worker "$FULL_PROMPT"
     # If TERM is swallowed, wait never returns. Thirty second grace, then KILL.
+    # The sleeps run as background children under a TERM trap: killing the
+    # subshell alone would orphan an external sleep, and that orphan holds
+    # stdout open, so anything piping this script's output (setup backfill
+    # through tee, for one) hangs until the unit ceiling expires.
     (
-      sleep "$UNIT_TIMEOUT"
+      trap 'kill $! 2>/dev/null; exit 0' TERM
+      sleep "$UNIT_TIMEOUT" & wait $!
       kill -TERM "$AGENT_PID" 2>/dev/null || exit 0
       touch "$WATCHDOG_FLAG"
-      sleep 30
+      sleep 30 & wait $!
       kill -KILL "$AGENT_PID" 2>/dev/null
     ) &
     WATCHDOG_PID=$!

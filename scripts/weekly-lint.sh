@@ -193,11 +193,15 @@ report file must have been written."
 
     rm -f "$WATCHDOG_FLAG"
     start_worker "$FULL_PROMPT"
+    # Same TERM-trapped watchdog as daily-ingest.sh: killing the subshell
+    # alone would orphan the external sleep, which holds stdout open and
+    # hangs any pipe reading this script's output.
     (
-      sleep "$UNIT_TIMEOUT"
+      trap 'kill $! 2>/dev/null; exit 0' TERM
+      sleep "$UNIT_TIMEOUT" & wait $!
       kill -TERM "$AGENT_PID" 2>/dev/null || exit 0
       touch "$WATCHDOG_FLAG"
-      sleep 30
+      sleep 30 & wait $!
       kill -KILL "$AGENT_PID" 2>/dev/null
     ) &
     WATCHDOG_PID=$!
