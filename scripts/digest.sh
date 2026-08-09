@@ -43,9 +43,13 @@ if [ ! -d "$VAULT/.git" ]; then
 fi
 
 if [ -e "$LOCK" ]; then
+  LOCK_PID="$(cat "$LOCK" 2>/dev/null)"
   LOCK_MTIME="$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null)"
   LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
-  if [ "$LOCK_AGE" -gt 7200 ]; then
+  if [[ "$LOCK_PID" == <-> ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    log "WARNING: stale lock (owner pid $LOCK_PID is dead), removing and continuing"
+    rm -f "$LOCK"
+  elif [ "$LOCK_AGE" -gt 7200 ]; then
     log "WARNING: stale lock (${LOCK_AGE}s), removing and continuing"
     rm -f "$LOCK"
   else
@@ -53,12 +57,12 @@ if [ -e "$LOCK" ]; then
     # a silently skipped month looks identical to a broken pipeline. The
     # 09:37 slot can legitimately collide with a long first-of-month
     # ingest, which may hold the shared lock for hours.
-    notify "another job holds the lock (${LOCK_AGE}s, probably the ingest), digest skipped; run scripts/digest.sh by hand"
+    notify "another job holds the lock (pid ${LOCK_PID:-?}, ${LOCK_AGE}s, probably the ingest), digest skipped; run scripts/digest.sh by hand"
     exit 0
   fi
 fi
 trap 'rm -f "$LOCK"' EXIT
-touch "$LOCK"
+print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
 

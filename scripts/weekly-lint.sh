@@ -94,16 +94,23 @@ if [ ! -d "$VAULT/.git" ]; then
   exit 1
 fi
 
-# The lock is SHARED with daily-ingest. In a healthy run it is refreshed
-# after every unit, so a lock older than two hours is dead.
+# The lock is SHARED with daily-ingest. Staleness has two signals: a dead
+# owner pid inside the lock (a killed driver cannot run its exit trap),
+# or an mtime older than two hours — a healthy run refreshes the lock
+# after every unit, so a live lock can never age that much. An empty pid
+# means an older lock format; the age rule covers it.
 if [ -e "$LOCK" ]; then
+  LOCK_PID="$(cat "$LOCK" 2>/dev/null)"
   LOCK_MTIME="$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null)"
   LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
-  if [ "$LOCK_AGE" -gt 7200 ]; then
+  if [[ "$LOCK_PID" == <-> ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    log "WARNING: stale lock (owner pid $LOCK_PID is dead), removing and continuing"
+    rm -f "$LOCK"
+  elif [ "$LOCK_AGE" -gt 7200 ]; then
     log "WARNING: stale lock (${LOCK_AGE}s), removing and continuing"
     rm -f "$LOCK"
   else
-    notify_fail "lock held (${LOCK_AGE}s, probably the ingest is running), lint skipped; by hand: scripts/weekly-lint.sh"
+    notify_fail "lock held by pid ${LOCK_PID:-?} (${LOCK_AGE}s, probably the ingest is running), lint skipped; by hand: scripts/weekly-lint.sh"
     exit 0
   fi
 fi
@@ -113,7 +120,7 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
-touch "$LOCK"
+print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
 

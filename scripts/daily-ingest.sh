@@ -113,18 +113,26 @@ if [ ! -d "$VAULT/.git" ]; then
   exit 1
 fi
 
-# A stale lock swallows every later run in silence. A crash or hard reboot
-# cannot run the exit trap, so a lock older than two hours is dead: in a
-# healthy run the lock is refreshed after every unit and can never age that
-# much while alive.
+# A stale lock swallows every later run in silence. Two staleness signals,
+# either one clears it: the owner pid written inside the lock (a killed
+# driver cannot run its exit trap, but its pid dies with it — seen live
+# when a launchctl bootout mid-run left a freshly touched lock that
+# blocked runs for two hours), and the mtime age rule as fallback for pid
+# reuse and for locks written by older versions that kept the file empty.
+# In a healthy run the lock is refreshed after every unit and can never
+# age past the threshold while alive.
 if [ -e "$LOCK" ]; then
+  LOCK_PID="$(cat "$LOCK" 2>/dev/null)"
   LOCK_MTIME="$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null)"
   LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
-  if [ "$LOCK_AGE" -gt 7200 ]; then
+  if [[ "$LOCK_PID" == <-> ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    log "WARNING: stale lock found (owner pid $LOCK_PID is dead), removing and continuing"
+    rm -f "$LOCK"
+  elif [ "$LOCK_AGE" -gt 7200 ]; then
     log "WARNING: stale lock found (${LOCK_AGE}s, previous run crashed), removing and continuing"
     rm -f "$LOCK"
   else
-    log "lock held (${LOCK_AGE}s), run skipped"
+    log "lock held by pid ${LOCK_PID:-?} (${LOCK_AGE}s), run skipped"
     exit 0
   fi
 fi
@@ -137,7 +145,7 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
-touch "$LOCK"
+print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
 
