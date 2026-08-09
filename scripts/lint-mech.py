@@ -31,11 +31,31 @@ SKIP_PARTS = {".git", ".obsidian", ".a5n-logs", "raw", "scripts", ".claude",
 # project is covered without touching this file.
 PROJECTS = sorted(d.name for d in VAULT.iterdir() if (d / "sources").is_dir())
 
+# The schema puts pages in a closed set of places, so that set is the scan
+# boundary: anything else living in the directory is not a vault page. A
+# deny list cannot do this job, because it has to grow every time a new
+# kind of neighbour shows up. Most visible when the vault shares a
+# directory with the A5N checkout itself: README.md, template/, docs/ and
+# .github/ were scanned as pages and reported as dead links (targets like
+# LICENSE do exist, they are simply not .md) and as orphans (nothing links
+# to a contribution guide). fix-links.py draws the same boundary.
+SCHEMA_DIRS = set(PROJECTS) | {"patterns", "chess-moves"}
+SCHEMA_ROOT_FILES = {"index.md", "log.md", "GOALS.md", "CLAUDE.md", "AGENTS.md"}
+
+
+def in_schema(rel) -> bool:
+    if len(rel.parts) == 1:
+        return rel.name in SCHEMA_ROOT_FILES
+    return rel.parts[0] in SCHEMA_DIRS
+
+
 # --- page inventory ---
 pages = []
 for p in sorted(VAULT.rglob("*.md")):
     rel = p.relative_to(VAULT)
     if any(part in SKIP_PARTS for part in rel.parts) or rel.name == "lint-report.md":
+        continue
+    if not in_schema(rel):
         continue
     pages.append(rel)
 

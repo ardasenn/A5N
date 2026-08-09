@@ -31,10 +31,28 @@ except ConfigError as exc:
 SKIP_PARTS = {".git", ".obsidian", ".a5n-logs", "raw", "scripts", ".claude",
               "node_modules", "digests"}
 
+# Same scan boundary as lint-mech.py, and it matters more here: this script
+# edits what it scans. When the vault shares a directory with the A5N
+# checkout, template/namespace/index.md is a template whose `../patterns/`
+# link is correct only after setup.sh renders it into a namespace, so a
+# rewrite here would ship a broken template to every later project.
+PROJECTS = sorted(d.name for d in VAULT.iterdir() if (d / "sources").is_dir())
+SCHEMA_DIRS = set(PROJECTS) | {"patterns", "chess-moves"}
+SCHEMA_ROOT_FILES = {"index.md", "log.md", "GOALS.md", "CLAUDE.md", "AGENTS.md"}
+
+
+def in_schema(rel) -> bool:
+    if len(rel.parts) == 1:
+        return rel.name in SCHEMA_ROOT_FILES
+    return rel.parts[0] in SCHEMA_DIRS
+
+
 pages = []
 for p in sorted(VAULT.rglob("*.md")):
     rel = p.relative_to(VAULT)
     if any(part in SKIP_PARTS for part in rel.parts) or rel.name == "lint-report.md":
+        continue
+    if not in_schema(rel):
         continue
     pages.append(rel)
 
