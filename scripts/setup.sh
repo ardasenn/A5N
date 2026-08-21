@@ -126,6 +126,45 @@ PLIST
   fi
 }
 
+install_systemd() {
+  local name="$1" script="$2" oncalendar="$3" description="$4"
+  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  mkdir -p "$dir"
+  # A user manager starts services with a nearly empty PATH, so the runner
+  # binary and git are resolved from an explicit list, the same way the
+  # launchd plist above does it.
+  cat > "$dir/$name.service" <<UNIT
+[Unit]
+Description=$description
+
+[Service]
+Type=oneshot
+WorkingDirectory=$REPO
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/bin/zsh $script
+UNIT
+  cat > "$dir/$name.timer" <<UNIT
+[Unit]
+Description=$description
+
+[Timer]
+OnCalendar=$oncalendar
+# A machine that was off at the scheduled minute still runs the job once it
+# comes back. Without this a desktop that sleeps through 09:07 silently
+# ingests nothing that day, and the transcript deletion clock keeps running.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl --user daemon-reload 2>/dev/null
+  if systemctl --user enable --now "$name.timer" 2>/dev/null; then
+    say "  $name.timer at $oncalendar"
+  else
+    say "  warning: systemctl refused $name.timer; inspect with: systemctl --user status $name.timer"
+  fi
+}
+
 # "09:07", "sun 11:07" and "1 09:37" turn into launchd calendar keys. A
 # leading token that is all digits is a day of the month (monthly job), a
 # named token is a weekday (weekly job), no token means daily.
@@ -166,6 +205,33 @@ calendar_keys() {
         <integer>${minute#0}</integer>"
 }
 
+# The same three shapes calendar_keys() reads, rendered as a systemd
+# OnCalendar expression instead of launchd calendar keys.
+systemd_calendar() {
+  # One assignment per local, for the zsh expansion order reason
+  # calendar_keys() documents above.
+  local spec="$1"
+  local when="" clock="$spec"
+  case "$spec" in
+    *" "*) when="${spec%% *}"; clock="${spec##* }" ;;
+  esac
+  local hour="${clock%%:*}"
+  local minute="${clock##*:}"
+  # 10# forces base ten: "09" is a legal schedule and a leading zero would
+  # otherwise be read as octal and rejected.
+  local stamp
+  stamp="$(printf '%02d:%02d:00' "$((10#$hour))" "$((10#$minute))")"
+  if [ -z "$when" ]; then
+    print -r -- "*-*-* $stamp"
+    return
+  fi
+  case "$when" in
+    <1-31>) printf -- '*-*-%02d %s\n' "$((10#$when))" "$stamp" ;;
+    sun|mon|tue|wed|thu|fri|sat) print -r -- "${(C)when} *-*-* $stamp" ;;
+    *) die "unknown weekday or day of month in schedule: $when" ;;
+  esac
+}
+
 if [ "$A5N_SCHEDULE_ENABLED" = "yes" ]; then
   if [ "$(uname)" = "Darwin" ]; then
     say "installing scheduled jobs"
@@ -179,8 +245,26 @@ if [ "$A5N_SCHEDULE_ENABLED" = "yes" ]; then
     install_launchd "com.a5n.ingest" "$REPO/scripts/daily-ingest.sh" "$CAL_INGEST"
     install_launchd "com.a5n.lint" "$REPO/scripts/weekly-lint.sh" "$CAL_LINT"
     install_launchd "com.a5n.digest" "$REPO/scripts/digest.sh" "$CAL_DIGEST"
+  elif command -v systemctl >/dev/null 2>&1; then
+    say "installing scheduled jobs"
+    # Captured and CHECKED before any unit is written, for the same reason
+    # the launchd branch above does it: a die() inside $(...) only kills the
+    # subshell, and an empty OnCalendar makes systemd refuse the timer.
+    CAL_INGEST="$(systemd_calendar "$A5N_SCHEDULE_INGEST")" || die "invalid ingest schedule: $A5N_SCHEDULE_INGEST"
+    CAL_LINT="$(systemd_calendar "$A5N_SCHEDULE_LINT")" || die "invalid lint schedule: $A5N_SCHEDULE_LINT"
+    CAL_DIGEST="$(systemd_calendar "$A5N_SCHEDULE_DIGEST")" || die "invalid digest schedule: $A5N_SCHEDULE_DIGEST"
+    install_systemd "a5n-ingest" "$REPO/scripts/daily-ingest.sh" "$CAL_INGEST" "A5N daily ingest"
+    install_systemd "a5n-lint" "$REPO/scripts/weekly-lint.sh" "$CAL_LINT" "A5N weekly lint"
+    install_systemd "a5n-digest" "$REPO/scripts/digest.sh" "$CAL_DIGEST" "A5N monthly digest"
+    # User timers are torn down at logout unless lingering is on, which
+    # turns a working install into one that only fires while you happen to
+    # be logged in.
+    if [ "$(loginctl show-user "$USER" --property=Linger 2>/dev/null)" != "Linger=yes" ]; then
+      say "  note: user lingering is off, so these timers stop when you log out"
+      say "  turn it on with: loginctl enable-linger $USER"
+    fi
   else
-    say "scheduling is macOS only for now. Add these to crontab yourself:"
+    say "no launchd and no systemd here. Add these to crontab yourself:"
     say "  ingest at $A5N_SCHEDULE_INGEST -> $REPO/scripts/daily-ingest.sh"
     say "  lint at $A5N_SCHEDULE_LINT     -> $REPO/scripts/weekly-lint.sh"
     say "  digest at $A5N_SCHEDULE_DIGEST -> $REPO/scripts/digest.sh"

@@ -90,6 +90,10 @@ configured project, initialises git, and installs the scheduled jobs. Run it
 again any time: existing pages are never overwritten, so rerunning is how you
 add a project or change the schedule.
 
+The scheduled jobs are launchd agents on macOS and systemd user timers on
+Linux. Either way a run the machine slept through is caught up when it comes
+back, so a desktop that is off at 09:07 still ingests that day.
+
 Nothing runs until `config.ini` exists. A fresh checkout cannot touch a vault
 by accident.
 
