@@ -92,6 +92,11 @@ bir namespace açar, git'i başlatır ve zamanlanmış görevleri kurar. İstedi
 zaman tekrar çalıştırabilirsin: mevcut sayfaların üzerine asla yazmaz,
 dolayısıyla yeni proje eklemenin ve zamanlamayı değiştirmenin yolu budur.
 
+Zamanlanmış görevler macOS'ta launchd agent'ı, Linux'ta systemd user timer'ı
+olarak kurulur. İkisinde de makinenin kapalı geçirdiği bir koşu, makine geri
+geldiğinde telafi edilir; 09:07'de kapalı olan bir masaüstü o günü yine de
+işler.
+
 `config.ini` yoksa hiçbir şey çalışmaz. Taze bir klon yanlışlıkla bir vault'a
 dokunamaz.
 
