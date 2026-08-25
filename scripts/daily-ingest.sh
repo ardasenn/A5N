@@ -123,7 +123,15 @@ fi
 # age past the threshold while alive.
 if [ -e "$LOCK" ]; then
   LOCK_PID="$(cat "$LOCK" 2>/dev/null)"
-  LOCK_MTIME="$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null)"
+  # GNU stat -f means "filesystem status", not mtime, and prints that block to
+  # stdout even while it exits nonzero — so the BSD-first order fed filesystem
+  # text to the arithmetic below and killed every run (Linux, 2026-08-23..25:
+  # three silent ingest failures behind one stale lock). GNU first, BSD second,
+  # and a digit guard so no platform can poison the math again. An unreadable
+  # mtime counts as fresh: clearing a live owner is worse than one skipped run,
+  # and the pid check above is what actually clears a dead owner.
+  LOCK_MTIME="$(stat -c %Y "$LOCK" 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null)"
+  [[ "$LOCK_MTIME" == <-> ]] || LOCK_MTIME="$(date +%s)"
   LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
   if [[ "$LOCK_PID" == <-> ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
     log "WARNING: stale lock found (owner pid $LOCK_PID is dead), removing and continuing"
