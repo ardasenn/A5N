@@ -64,7 +64,11 @@ by_stem = {}
 for rel in pages:
     by_stem.setdefault(rel.stem, []).append(rel)
 
-MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+?)(?:#[^)]*)?\)")
+# The label alternative also accepts a whole [[wikilink]], so a markdown
+# link whose label embeds one still parses. With a plain [^\]]* label the
+# regex stops at the wikilink's first ], the line matches nothing at all,
+# and the link is lost from both the dead check and the orphan graph.
+MD_LINK = re.compile(r"\[(?:[^\[\]]|\[\[[^\]]*\]\])*\]\(([^)\s]+?)(?:#[^)]*)?\)")
 # The trailing \\? absorbs the backslash of a table escaped pipe: inside a
 # markdown table an alias link must be written [[page\|alias]], otherwise the
 # pipe would split the cell. Without this the backslash ends up in the target
