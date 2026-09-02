@@ -137,7 +137,12 @@ for rel in pages:
             correct = os.path.relpath(str(real), start=str(rel.parent))
             if not t.strip().endswith(".md"):
                 correct = correct[:-3]  # a wikilink never carries the .md suffix
-            new_line = re.sub(re.escape(t) + r"(?=[\]\|#\)])", correct, lines[i])
+            # The optional backslash in the lookahead is the table escaped
+            # pipe: a link written [[page\|alias]] inside a table has the
+            # backslash sitting where the plain form has the pipe. Without
+            # it the substitution silently matches nothing, so a wrong path
+            # table link is neither repaired nor reported here.
+            new_line = re.sub(re.escape(t) + r"(?=\\?[\]\|#\)])", correct, lines[i])
             if new_line != lines[i]:
                 lines[i] = new_line
                 changed = True
