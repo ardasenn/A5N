@@ -62,7 +62,11 @@ for rel in pages:
     by_stem.setdefault(rel.stem, []).append(rel)
 
 MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+?)(?:#[^)]*)?\)")
-WIKI_LINK = re.compile(r"\[\[([^\]|#]+?)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
+# The trailing \\? absorbs the backslash of a table escaped pipe: inside a
+# markdown table an alias link must be written [[page\|alias]], otherwise the
+# pipe would split the cell. Without this the backslash ends up in the target
+# and every such link is reported dead.
+WIKI_LINK = re.compile(r"\[\[([^\]|#]+?)\\?(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 
 def resolve_ok(src: Path, target: str) -> bool:
     t = target.strip()
