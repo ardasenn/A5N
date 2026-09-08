@@ -152,11 +152,22 @@ yazılır, link değil:
 * yanlış: `[ListingRepository.cs:142](apps/backend/.../ListingRepository.cs:142)`
 * yanlış: `[[apps/backend/.../ListingRepository.cs:142]]`
 
+Ajanın kendi hafıza dosyası da vault sayfası değildir, adı ne kadar slug'a
+benzerse benzesin backtick'le yazılır.
+
+Wikilink hedefi dosya adından çözülür: hedef dosyanın `.md`'siz adı TAM
+yazılır. Kaynak sayfası `YYYY-MM-DD-<slug>.md` adını taşır, dolayısıyla ona
+verilen link tarihi de içerir:
+
+* doğru: `[[2026-08-19-tea656-round2-kw-turkiye-fixleri]]`
+* yanlış: `[[tea656-round2-kw-turkiye-fixleri]]`
+
 Harici URL'ler normal markdown link olabilir. Kural sadece repo içi kod
 yolları içindir.
 
 Sebep: hedefi vault'ta olmayan her link ölü linktir ve haftalık lint bunların
-hepsini raporlar.
+hepsini raporlar. En sık görüleni açık ara düşen tarih önekidir: yazan kendi
+seçtiği slug'ı hatırlar, dosya adının önünde bir tarih taşıdığını unutur.
 
 ## Adlandırma
 

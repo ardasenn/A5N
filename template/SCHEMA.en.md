@@ -154,11 +154,23 @@ as links:
 * wrong: `[ListingRepository.cs:142](apps/backend/.../ListingRepository.cs:142)`
 * wrong: `[[apps/backend/.../ListingRepository.cs:142]]`
 
+A file in your own agent memory is not a vault page either, so it is
+backticked too, however tempting its name looks like a slug.
+
+A wikilink resolves by file basename, so the target must be the target
+file's name without `.md`, written in full. A source page is named
+`YYYY-MM-DD-<slug>.md`, so a link to one carries the date as well:
+
+* right: `[[2026-08-19-tea656-round2-kw-turkiye-fixleri]]`
+* wrong: `[[tea656-round2-kw-turkiye-fixleri]]`
+
 External URLs may be ordinary markdown links. The rule is about repository
 code paths.
 
 Reason: any link whose target is not in the vault is a dead link, and the
-weekly lint reports them all.
+weekly lint reports them all. The dropped date prefix is the most common
+one by far: the writer remembers the slug it chose and forgets that the
+filename carries a date in front of it.
 
 ## Naming
 
