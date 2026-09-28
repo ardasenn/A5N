@@ -170,9 +170,13 @@ trap cleanup EXIT
 # does not trap ends it: the remote lock stayed on the remote and the
 # other machine treated it as busy for two hours. Exiting from a trap
 # runs cleanup. INT and HUP are the same stop for a run started by hand.
-trap 'exit 143' TERM
-trap 'exit 130' INT
-trap 'exit 129' HUP
+# The worker is stopped first: started with & by a non-interactive shell
+# it ignores INT, and a kill of the driver alone never reaches it, so the
+# released locks would otherwise sit next to a worker still writing.
+stop_worker() { [ -n "${AGENT_PID:-}" ] && kill -TERM "$AGENT_PID" 2>/dev/null; }
+trap 'stop_worker; exit 143' TERM
+trap 'stop_worker; exit 130' INT
+trap 'stop_worker; exit 129' HUP
 print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
@@ -313,6 +317,9 @@ leave no out of schema path. Every other rule still applies."
     ) &
     WATCHDOG_PID=$!
     wait "$AGENT_PID"; AGENT_EXIT=$?
+    # Reaped, and a reaped pid can be reused: the stop trap must not
+    # signal it.
+    AGENT_PID=""
     kill "$WATCHDOG_PID" 2>/dev/null; WATCHDOG_PID=""
     cat "$OUT" >> "$LOG"
 

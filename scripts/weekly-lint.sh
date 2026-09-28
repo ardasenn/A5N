@@ -134,11 +134,13 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
-# Stop signals exit through cleanup, so the remote lock is released: the
-# reason is in daily-ingest.sh.
-trap 'exit 143' TERM
-trap 'exit 130' INT
-trap 'exit 129' HUP
+# Stop signals stop the worker, then exit through cleanup, so the remote
+# lock is released and no worker outlives it: the reasons are in
+# daily-ingest.sh.
+stop_worker() { [ -n "${AGENT_PID:-}" ] && kill -TERM "$AGENT_PID" 2>/dev/null; }
+trap 'stop_worker; exit 143' TERM
+trap 'stop_worker; exit 130' INT
+trap 'stop_worker; exit 129' HUP
 print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
@@ -269,6 +271,9 @@ report file must have been written."
     ) &
     WATCHDOG_PID=$!
     wait "$AGENT_PID"; AGENT_EXIT=$?
+    # Reaped, and a reaped pid can be reused: the stop trap must not
+    # signal it.
+    AGENT_PID=""
     kill "$WATCHDOG_PID" 2>/dev/null; WATCHDOG_PID=""
     cat "$OUT" >> "$LOG"
 

@@ -911,6 +911,8 @@ t_setup_branch() {
   git -C "$v" remote add origin "$W/origin.git"
   out="$(a5n m1 setup.sh 2>&1)"
   has "another branch stops setup" "$out" "the vault is on branch 'master' and sync.branch is 'main'"
+  # A vault setup created itself can sit on master: renaming is the fix.
+  has "the rename is offered" "$out" "branch -m main"
   check_eq "no timer was touched" "" "$(calls systemctl)"
   export XDG_CONFIG_HOME="$HOME/.config"
 }
@@ -967,25 +969,33 @@ t_stopped_run() {
   machine_new m1
   a5n m1 daily-ingest.sh
   session m1 alpha "$A1" 2026-09-01
-  local v="$W/m1/vault" script drv
+  local v="$W/m1/vault" script how drv wpid i
   # systemctl stop, launchctl bootout and a shutdown send TERM to the whole
-  # group, driver and worker alike, and zsh skips its EXIT trap when an
-  # untrapped signal ends it.
+  # group; Ctrl-C on a run by hand sends INT to it, which a worker started
+  # with & ignores; `kill <pid>` reaches the driver alone. zsh skips its
+  # EXIT trap when an untrapped signal ends it. Each round starts with the
+  # previous round's interrupted unit, which the driver recovers first.
   for script in daily-ingest.sh weekly-lint.sh; do
-    rm -f "$W/runner.pid"
-    A5N_CONFIG="$W/m1/config.ini" FAKE_RUNNER_SLEEP=30 FAKE_RUNNER_PIDFILE="$W/runner.pid" \
-      setsid zsh "$REPO/scripts/$script" &
-    drv=$!
-    wait_for "the $script worker started" "[ -s '$W/runner.pid' ]" || return
-    check "$script holds the remote lock mid unit" test -n "$(remote_lock)"
-    kill -TERM -- "-$drv" 2>/dev/null
-    wait "$drv" 2>/dev/null
-    check_eq "a stopped $script releases the remote lock" "" "$(remote_lock)"
-    check "a stopped $script removes its local lock" test ! -e "$v/.a5n-logs/.lock"
-    check "the unit flag stays for the next run" test -e "$v/.a5n-logs/.unit-in-progress"
-    # The next run recovers the interrupted unit (t_interrupted_unit shows
-    # how), which leaves a clean vault for the next round.
-    a5n m1 daily-ingest.sh
+    for how in group-term group-int driver-term; do
+      rm -f "$W/runner.pid"
+      A5N_CONFIG="$W/m1/config.ini" FAKE_RUNNER_SLEEP=120 FAKE_RUNNER_PIDFILE="$W/runner.pid" \
+        setsid zsh "$REPO/scripts/$script" &
+      drv=$!
+      wait_for "the $script worker started ($how)" "[ -s '$W/runner.pid' ]" || return
+      wpid="$(cat "$W/runner.pid")"
+      check "$script holds the remote lock mid unit ($how)" test -n "$(remote_lock)"
+      case "$how" in
+        group-term) kill -TERM -- "-$drv" ;;
+        group-int) kill -INT -- "-$drv" ;;
+        driver-term) kill -TERM "$drv" ;;
+      esac 2>/dev/null
+      wait "$drv" 2>/dev/null
+      for i in {1..50}; do kill -0 "$wpid" 2>/dev/null || break; sleep 0.1; done
+      check "a stopped $script leaves no worker behind ($how)" sh -c "! kill -0 $wpid 2>/dev/null"
+      check_eq "a stopped $script releases the remote lock ($how)" "" "$(remote_lock)"
+      check "a stopped $script removes its local lock ($how)" test ! -e "$v/.a5n-logs/.lock"
+      check "the unit flag stays for the next run ($how)" test -e "$v/.a5n-logs/.unit-in-progress"
+    done
   done
 }
 

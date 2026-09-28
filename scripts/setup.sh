@@ -101,7 +101,7 @@ if [ "$A5N_SYNC_ENABLED" = "yes" ]; then
   # notification while the transcript deletion clock runs.
   VAULT_BRANCH="$(git -C "$VAULT" symbolic-ref -q --short HEAD)"
   [ "$VAULT_BRANCH" = "$A5N_SYNC_BRANCH" ] \
-    || die "sync is on but the vault is on branch '${VAULT_BRANCH:-(detached HEAD)}' and sync.branch is '$A5N_SYNC_BRANCH'. Check it out (git -C \"$VAULT\" checkout $A5N_SYNC_BRANCH) or change sync.branch"
+    || die "sync is on but the vault is on branch '${VAULT_BRANCH:-(detached HEAD)}' and sync.branch is '$A5N_SYNC_BRANCH'. Rename it (git -C \"$VAULT\" branch -m $A5N_SYNC_BRANCH), check that branch out (git -C \"$VAULT\" checkout $A5N_SYNC_BRANCH) or change sync.branch"
   if [ -n "$A5N_SYNC_RAW_REMOTE" ]; then
     command -v rclone >/dev/null 2>&1 \
       || die "sync.raw_remote is set but rclone is not installed"

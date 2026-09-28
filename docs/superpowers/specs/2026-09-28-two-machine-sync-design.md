@@ -113,11 +113,14 @@ whole and two writers would take turns replacing each other's output.
    conflict aborts the rebase, marks the run blocked and notifies with the
    conflicting paths: it will not resolve itself.
 8. Ingest and lint: raw download for every namespace, `rclone copy
-   --immutable --exclude .gitkeep <raw_remote>/<ns>/raw <vault>/<ns>/raw`.
-   Exit code 3 (source directory not found) is a project with no uploads
-   yet, not an error. Other failures notify once and the run continues: the
-   queue only looks at local raw files, so a missing download delays a unit
-   at most.
+   --immutable --exclude '.*' <raw_remote>/<ns>/raw <vault>/<ns>/raw`.
+   Dotfiles stay out: `.gitkeep` placeholders and the `.DS_Store` Finder
+   writes are both rewritten, and to `--immutable` a rewritten file is a
+   modified one; a raw file is never a dotfile (widened from `.gitkeep`
+   after review). Exit code 3 (source directory not found) is a project with
+   no uploads yet, not an error. Other failures notify once and the run
+   continues: the queue only looks at local raw files, so a missing download
+   delays a unit at most.
 9. Ingest and lint: one attempt at the remote lock.
 
 Namespaces are every vault root directory holding `sources/`, plus every
@@ -181,7 +184,12 @@ unit rules; a dropped digest commit notifies.
 
 ### End of run
 
-The EXIT trap releases the remote lock if this run holds it.
+The EXIT trap releases the remote lock if this run holds it. zsh skips
+the EXIT trap when a signal it does not trap ends it, and a service
+manager stops a run with TERM, so the ingest and the lint trap TERM, INT
+and HUP: the trap stops the worker first (started with `&` it ignores
+INT, and a kill of the driver alone never reaches it), then exits
+through the EXIT trap. Found when the first real run was stopped.
 
 ## The remote lock
 
@@ -257,12 +265,13 @@ sync on, would push them to the other machine).
   mtime on every run, and `rclone copy --immutable` reports a file whose
   mtime changed as modified (exit code 6 on a real vault).
 * Sync on, after the git step and before scheduling: the git remote must
-  exist; with `raw_remote` set, rclone must be installed and, unless the
-  value is an absolute path or an on the fly `:backend:` path, the remote
-  name before the first colon must be in `rclone listremotes`. Any miss
-  stops setup with the command that fixes it, before a timer is touched. A
-  `raw_remote` while `raw/` is still tracked by git prints a warning (raw
-  files would travel twice).
+  exist and the vault must be on `sync.branch` (every run would skip,
+  capture included, on any other branch); with `raw_remote` set, rclone must
+  be installed and, unless the value is an absolute path or an on the fly
+  `:backend:` path, the remote name before the first colon must be in
+  `rclone listremotes`. Any miss stops setup with the command that fixes it,
+  before a timer is touched. A `raw_remote` while `raw/` is still tracked by
+  git prints a warning (raw files would travel twice).
 * Sync on: `**/log.md merge=union` is appended to the vault's
   `info/attributes` (path from `git rev-parse --git-path`) unless present.
   Machine local on purpose: the vault itself carries no `.gitattributes`.
@@ -339,6 +348,13 @@ Scenarios:
     ingest, lint and digest must produce the same `git log --format='%s
     %T'` (subject and tree), and the recorders must show no network call.
     The acceptance run uses 53af4e9, the commit before this change.
+13. Added after review: `setup.sh` stops on a vault that is not on
+    `sync.branch`; a `.DS_Store` rewritten inside `raw/` raises no alarm
+    and never travels; a rebase conflict at the start of a run blocks it
+    (capture still happens, no worker, no lock, a notification with the
+    path); a run stopped mid unit by TERM to its group, INT to its group
+    or TERM to the driver alone leaves no worker behind, releases both
+    locks and keeps the unit flag for the next run.
 
 Plus the standard checks: `py_compile`, `zsh -n` on every shell file,
 `config.py --check` on the test configs, and config validation cases.
