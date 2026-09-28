@@ -190,6 +190,11 @@ manager stops a run with TERM, so the ingest and the lint trap TERM, INT
 and HUP: the trap stops the worker first (started with `&` it ignores
 INT, and a kill of the driver alone never reaches it), then exits
 through the EXIT trap. Found when the first real run was stopped.
+Anything started while a signal trap runs inherits that signal blocked,
+so the network watchdog ends its sleep and, after a 5 second grace, the
+command with KILL; otherwise a leftover sleep kept `systemctl stop`
+waiting 90 seconds. The systemd service treats 143, 130 and 129 as
+success: a stop is not a failure.
 
 ## The remote lock
 

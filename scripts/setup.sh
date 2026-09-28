@@ -202,6 +202,9 @@ Type=oneshot
 WorkingDirectory=$REPO
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 ExecStart=/bin/zsh $script
+# A run stopped by systemctl stop, Ctrl-C or a hangup leaves through its
+# signal trap with 143, 130 or 129: a stop, not a failure.
+SuccessExitStatus=143 130 129
 UNIT
   cat > "$dir/$name.timer" <<UNIT
 [Unit]

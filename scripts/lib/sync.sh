@@ -60,10 +60,17 @@ sync_bounded() {  # <seconds> <command...>
   shift
   "$@" < /dev/null &
   pid=$!
+  # KILL is the last word, for the sleep and for the command: a process
+  # started while a signal trap runs inherits that signal blocked, and the
+  # lock release runs from the drivers' TERM trap. With TERM alone the
+  # sleep outlived the run and systemctl stop waited 90 s for it, then
+  # marked the stop failed.
   (
-    trap 'kill $! 2>/dev/null; exit 0' TERM
+    trap 'kill -KILL $! 2>/dev/null; exit 0' TERM
     sleep "$secs" & wait $!
-    kill -TERM "$pid" 2>/dev/null
+    kill -TERM "$pid" 2>/dev/null || exit 0
+    sleep 5 & wait $!
+    kill -KILL "$pid" 2>/dev/null
   ) > /dev/null 2>&1 &
   watchdog=$!
   wait "$pid"

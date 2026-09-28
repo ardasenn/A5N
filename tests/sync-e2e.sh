@@ -235,6 +235,10 @@ fake_lock() {  # <message fields> <now|old>: another machine's lock
   git --git-dir="$W/origin.git" update-ref refs/a5n/lock "$FAKE_LOCK"
 }
 
+session_left() {  # <session id>: processes still in that session
+  ps -eo pid=,sid=,args= | awk -v s="$1" '$2 == s' 2>/dev/null
+}
+
 wait_for() {  # <description> <shell condition>, up to 30 seconds
   local i
   for i in {1..300}; do
@@ -361,6 +365,8 @@ t_setup_checks() {
   check "its service file is gone" test ! -e "$units/a5n-lint.service"
   has "it was disabled" "$(calls systemctl)" "--user disable --now a5n-lint.timer"
   has "ingest is installed" "$(calls systemctl)" "--user enable --now a5n-ingest.timer"
+  has "a stopped run is not a failed unit" "$(cat "$units/a5n-ingest.service")" \
+    "SuccessExitStatus=143 130 129"
   has "digest is installed" "$(calls systemctl)" "--user enable --now a5n-digest.timer"
   has_not "lint is not installed" "$(calls systemctl)" "enable --now a5n-lint.timer"
 
@@ -992,6 +998,10 @@ t_stopped_run() {
       wait "$drv" 2>/dev/null
       for i in {1..50}; do kill -0 "$wpid" 2>/dev/null || break; sleep 0.1; done
       check "a stopped $script leaves no worker behind ($how)" sh -c "! kill -0 $wpid 2>/dev/null"
+      # Nothing else either: a leftover in the unit keeps systemctl stop
+      # waiting for its timeout, then the unit is marked failed.
+      for i in {1..30}; do [ -z "$(session_left "$drv")" ] && break; sleep 0.1; done
+      check_eq "a stopped $script leaves nothing in its session ($how)" "" "$(session_left "$drv")"
       check_eq "a stopped $script releases the remote lock ($how)" "" "$(remote_lock)"
       check "a stopped $script removes its local lock ($how)" test ! -e "$v/.a5n-logs/.lock"
       check "the unit flag stays for the next run ($how)" test -e "$v/.a5n-logs/.unit-in-progress"

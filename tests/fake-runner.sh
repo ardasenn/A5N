@@ -16,6 +16,9 @@
 #   FAKE_RUNNER_SHARED   text for line 3 of the root index.md: the shape of
 #                        an edit two machines can both make
 set -u
+# Stopped with TERM, the runner takes its sleep along: a sleep left in the
+# driver's session would hide the leaks t_stopped_run looks for.
+trap 'kill $! 2>/dev/null; exit 143' TERM
 
 prompt="${2:-}"
 kind="" project="" session="" raw="" date=""
@@ -34,7 +37,7 @@ done
 if [ "$kind" = A5N-TEST-LINT ]; then
   if [ -n "${FAKE_RUNNER_SLEEP:-}" ]; then
     [ -n "${FAKE_RUNNER_PIDFILE:-}" ] && print -r -- $$ > "$FAKE_RUNNER_PIDFILE"
-    sleep "$FAKE_RUNNER_SLEEP"
+    sleep "$FAKE_RUNNER_SLEEP" & wait $!
   fi
   counter=".a5n-logs/fake-lint-count"
   n=$(( $(cat "$counter" 2>/dev/null || print 0) + 1 ))
@@ -65,7 +68,7 @@ mkdir -p "${page:h}"
 if [ -n "${FAKE_RUNNER_SLEEP:-}" ]; then
   print -r -- "---" > "$page"
   [ -n "${FAKE_RUNNER_PIDFILE:-}" ] && print -r -- $$ > "$FAKE_RUNNER_PIDFILE"
-  sleep "$FAKE_RUNNER_SLEEP"
+  sleep "$FAKE_RUNNER_SLEEP" & wait $!
 fi
 cat > "$page" <<EOF
 ---
