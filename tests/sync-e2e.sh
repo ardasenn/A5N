@@ -388,6 +388,48 @@ t_setup_checks() {
   export XDG_CONFIG_HOME="$HOME/.config"
 }
 
+t_notify_linux() {
+  world notify
+  machine_config m1 off yes alpha
+  machine_local m1
+  # A missing unit prompt is a failure the ingest reports at once.
+  A5N_PROMPT_FILE="$W/missing.md" a5n m1 daily-ingest.sh
+  has "notify-send got the title" "$(calls notify)" "--app-name=A5N A5N ingest"
+  has "notify-send got the message" "$(calls notify)" "unit prompt missing or empty"
+  forget_calls
+  A5N_NO_NOTIFY=1 A5N_PROMPT_FILE="$W/missing.md" a5n m1 daily-ingest.sh
+  check_eq "A5N_NO_NOTIFY silences it" "" "$(calls notify)"
+}
+
+t_interrupted_unit() {
+  world interrupted
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  session m1 alpha "$A2" 2026-09-02
+  local v="$W/m1/vault" drv
+  # The worker writes half a page and sleeps; the whole run is killed the
+  # way a stopped service or a flat battery kills it.
+  A5N_CONFIG="$W/m1/config.ini" FAKE_RUNNER_SLEEP=30 FAKE_RUNNER_PIDFILE="$W/runner.pid" \
+    setsid zsh "$REPO/scripts/daily-ingest.sh" &
+  drv=$!
+  wait_for "the worker started" "[ -s '$W/runner.pid' ]" || return
+  kill -9 -- "-$drv" 2>/dev/null
+  wait "$drv" 2>/dev/null
+  check "the unit flag survived the kill" test -e "$v/.a5n-logs/.unit-in-progress"
+  check "half a page is on disk" test -n "$(git -C "$v" status --porcelain)"
+
+  a5n m1 daily-ingest.sh
+  has "the leftovers went to the stash" "$(git -C "$v" stash list)" \
+    "a5n: interrupted unit (ingest alpha/${A1:0:8}"
+  has_not "no manual changes commit swallowed them" "$(git -C "$v" log --format=%s)" \
+    "manual vault changes"
+  check_eq "the first session has one page" 1 "$(pages_for "$v" "$A1")"
+  check_eq "the second session has one page" 1 "$(pages_for "$v" "$A2")"
+  check "the flag is gone" test ! -e "$v/.a5n-logs/.unit-in-progress"
+  has "the user was told where to look" "$(calls notify)" "git stash list"
+}
+
 # --- runner ------------------------------------------------------------------
 # Every function named t_<scenario> is a scenario; each builds its own world.
 SCENARIOS=(${(k)functions})

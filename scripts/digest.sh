@@ -30,11 +30,13 @@ notify() {
   # stdout too: a hand run should say what happened without opening the log.
   print -r -- "$1"
   log "${2:+FAILED: }$1"
-  [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
-  if [ "$(uname)" = "Darwin" ]; then
-    /usr/bin/osascript -e "display notification \"$1\" with title \"A5N digest\"" >/dev/null 2>&1
-  fi
+  a5n_desktop_notify "A5N digest" "$1"
 }
+notify_fail() { notify "$1" fail; }
+
+# Shared with the other drivers: the notification itself and the
+# interrupted unit flag.
+source "$SCRIPT_DIR/lib/common.sh"
 
 if [ ! -d "$VAULT/.git" ]; then
   echo "vault is not a git repository: $VAULT" >&2
@@ -74,6 +76,10 @@ print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
 
+# Before anything writes: a unit a killed run left half written goes to the
+# stash, so the commit below cannot sweep it in as manual edits.
+recover_interrupted_unit || exit 1
+
 # Manual edits stay out of the digest commit, same rule as the other jobs.
 if [ -n "$(git status --porcelain)" ]; then
   log "WARNING: vault dirty before digest, committing manual edits separately"
@@ -81,9 +87,11 @@ if [ -n "$(git status --porcelain)" ]; then
   git commit -m "chore: manual vault changes (pre-digest $(date +%F))" >> "$LOG" 2>&1
 fi
 
+unit_begin "digest"
 if ! REL_PATH="$(python3 "$SCRIPT_DIR/digest.py" "$@" 2>>"$LOG")"; then
   notify "digest failed, see .a5n-logs/digest-$(date +%F).log" fail
   git checkout -- . 2>/dev/null
+  unit_end
   exit 1
 fi
 log "digest written: $REL_PATH"
@@ -94,6 +102,7 @@ if [ -n "$(git status --porcelain)" ]; then
   git commit -m "chore: digest $PERIOD" >> "$LOG" 2>&1
   log "committed"
 fi
+unit_end
 
 notify "monthly digest ready: $REL_PATH"
 exit 0

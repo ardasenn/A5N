@@ -49,11 +49,12 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 
 notify_fail() {
   log "FAILED: $1"
-  [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
-  if [ "$(uname)" = "Darwin" ]; then
-    /usr/bin/osascript -e "display notification \"$1\" with title \"A5N lint\"" >/dev/null 2>&1
-  fi
+  a5n_desktop_notify "A5N lint" "$1"
 }
+
+# Shared with the other drivers: the notification itself and the
+# interrupted unit flag.
+source "$SCRIPT_DIR/lib/common.sh"
 
 rollback_unit() {
   git reset --hard --quiet >> "$LOG" 2>&1
@@ -137,6 +138,10 @@ if [ ! -s "$PROMPT_FILE" ]; then
   exit 1
 fi
 
+# Before anything writes: a unit a killed run left half written goes to the
+# stash, so the commit below cannot sweep it in as manual edits.
+recover_interrupted_unit || exit 1
+
 # Hand written edits should not be mixed into lint commits.
 if [ -n "$(git status --porcelain)" ]; then
   log "WARNING: vault dirty before lint, committing manual edits separately"
@@ -145,6 +150,7 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 # --- 1+2. Mechanical layer (deterministic) ----------------------------------
+unit_begin "lint mechanical repairs"
 log "fix-links started"
 FIX_OUT="$(python3 "$SCRIPT_DIR/fix-links.py" 2>>"$LOG")"
 FIX_RC=$?
@@ -152,6 +158,7 @@ echo "$FIX_OUT" >> "$LOG"
 if [ "$FIX_RC" -ne 0 ]; then
   notify_fail "fix-links.py failed (rc=$FIX_RC), lint cancelled, leftovers reverted"
   rollback_unit
+  unit_end
   exit 1
 fi
 echo "$FIX_OUT" | head -1 > "$MECHDIR/last-fix-count.txt"
@@ -160,6 +167,7 @@ log "lint-mech started"
 if ! python3 "$SCRIPT_DIR/lint-mech.py" "$MECHDIR" >> "$LOG" 2>&1; then
   notify_fail "lint-mech.py failed, lint cancelled, leftovers reverted"
   rollback_unit
+  unit_end
   exit 1
 fi
 
@@ -168,6 +176,7 @@ if [ -n "$(git status --porcelain)" ]; then
   git commit -m "chore: lint mechanical link repairs $(date +%F)" >> "$LOG" 2>&1
   log "mechanical repairs committed"
 fi
+unit_end
 
 # --- 3. Semantic lint: one worker per project -------------------------------
 # The namespace list is dynamic: every vault root directory holding a
@@ -191,6 +200,7 @@ sys.stdout.write(t)
 PYEOF
 )"
 
+  unit_begin "lint $PROJ"
   UNIT_DONE=""; VREASON=""
   for ATTEMPT in 1 2; do
     FULL_PROMPT="$PROMPT"
@@ -267,6 +277,7 @@ report file must have been written."
     log "verification REJECTED (attempt $ATTEMPT): $PROJ, $VREASON"
     rollback_unit
   done
+  unit_end
 
   if [ -n "$UNIT_DONE" ]; then
     OK=$((OK+1))

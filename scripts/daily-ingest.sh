@@ -64,11 +64,12 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 # visible.
 notify_fail() {
   log "FAILED: $1"
-  [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
-  if [ "$(uname)" = "Darwin" ]; then
-    /usr/bin/osascript -e "display notification \"$1\" with title \"A5N ingest\"" >/dev/null 2>&1
-  fi
+  a5n_desktop_notify "A5N ingest" "$1"
 }
+
+# Shared with the other drivers: the notification itself and the
+# interrupted unit flag.
+source "$SCRIPT_DIR/lib/common.sh"
 
 # Undo a failed unit's leftovers. The unit started on a clean tree and its
 # siblings were committed immediately, so the scope is AT MOST one unit. The
@@ -162,6 +163,10 @@ if [ ! -s "$UNIT_PROMPT_FILE" ]; then
   exit 1
 fi
 
+# Before anything writes: a unit a killed run left half written goes to the
+# stash, so the commit below cannot sweep it in as manual edits.
+recover_interrupted_unit || exit 1
+
 # Hand written vault edits should not be mixed into ingest commits. Commit
 # them separately under an honest message.
 if [ -n "$(git status --porcelain)" ]; then
@@ -226,6 +231,8 @@ PYEOF
   # closes within the run instead of the queue chewing on the same unit for
   # days. Observed: of five same shaped units, two passed first try and
   # three had skipped the full id trace.
+  # From here until the commit or rollback below, a kill leaves pages behind.
+  unit_begin "ingest $PROJ/${SID:0:8}"
   UNIT_DONE=""; VREASON=""
   for ATTEMPT in 1 2; do
     FULL_PROMPT="$PROMPT"
@@ -292,6 +299,7 @@ leave no out of schema path. Every other rule still applies."
     log "verification REJECTED (attempt $ATTEMPT): $PROJ/$SID, rolled back"
     rollback_unit
   done
+  unit_end
 
   if [ -n "$UNIT_DONE" ]; then
     OK=$((OK+1))
