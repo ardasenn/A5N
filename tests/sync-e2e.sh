@@ -897,6 +897,70 @@ t_lint_prompt() {
   has_not "state: is no longer the only accepted field" "$p" "out of list \`state:\` value"
 }
 
+t_setup_branch() {
+  world setupbranch
+  local v="$W/m1/vault" out
+  export XDG_CONFIG_HOME="$W/xdg"
+  # Every run would skip, capture included, on a branch sync does not
+  # follow; setup is the place to say so, before a timer exists.
+  CFG_SCHEDULE=$'enabled = yes\ningest = 09:07\nlint = off\ndigest = off' \
+    machine_config m1 on yes alpha
+  mkdir -p "$v"
+  print -r -- $'.a5n-logs/\n**/raw/' > "$v/.gitignore"
+  git -C "$v" init -q -b master
+  git -C "$v" remote add origin "$W/origin.git"
+  out="$(a5n m1 setup.sh 2>&1)"
+  has "another branch stops setup" "$out" "the vault is on branch 'master' and sync.branch is 'main'"
+  check_eq "no timer was touched" "" "$(calls systemctl)"
+  export XDG_CONFIG_HOME="$HOME/.config"
+}
+
+t_raw_dotfiles() {
+  world dotfiles
+  machine_config m1 on no alpha
+  machine_new m1
+  local f="$W/m1/vault/alpha/raw/sessions/.DS_Store"
+  # Finder drops a .DS_Store into any folder it shows and rewrites it
+  # later; to --immutable a rewritten file is a modified one.
+  print -r -- "view one" > "$f"
+  a5n m1 daily-ingest.sh
+  print -r -- "view two, a longer one" > "$f"
+  a5n m1 daily-ingest.sh
+  check_eq "a rewritten Finder file raises no alarm" "" "$(calls notify)"
+  check "it never reached the storage" test ! -e "$W/drive/alpha/raw/sessions/.DS_Store"
+}
+
+t_start_conflict() {
+  world startconflict
+  machine_config m1 on yes alpha
+  machine_config m2 on yes beta
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  machine_clone m2
+  a5n m2 daily-ingest.sh
+  local v1="$W/m1/vault" v2="$W/m2/vault" before
+  # m2 pushes line 3 of the root index.md; m1 edits the same line by hand,
+  # which its next run commits as a manual change before it pulls.
+  sed -i '3s/.*/edited on m2/' "$v2/index.md"
+  git -C "$v2" commit -qam "chore: m2 edits the index"
+  git -C "$v2" push -q origin HEAD:main
+  sed -i '3s/.*/edited on m1/' "$v1/index.md"
+  session m1 alpha "$A1" 2026-09-01
+  before="$(remote_head)"
+  forget_calls
+  a5n m1 daily-ingest.sh
+  has "the conflict is reported with its path" "$(calls notify)" \
+    "local commits conflict with origin/main (index.md)"
+  has "capture still ran" "$(vlog m1)" "capture summary: copied=1"
+  check "the raw file is on disk" test -f "$v1/alpha/raw/sessions/$A1.jsonl"
+  check_eq "no unit ran" 0 "$(pages_for "$v1" "$A1")"
+  check "no rebase is left" test ! -d "$v1/.git/rebase-merge"
+  check_eq "m1's edit is untouched" "edited on m1" "$(sed -n 3p "$v1/index.md")"
+  check_eq "nothing was pushed" "$before" "$(remote_head)"
+  has_not "the lock was never tried" "$(calls git-net)" "refs/a5n/lock"
+  check "the failure clock started" test -s "$v1/.a5n-logs/.sync-failing-since"
+}
+
 # --- runner ------------------------------------------------------------------
 # Every function named t_<scenario> is a scenario; each builds its own world.
 SCENARIOS=(${(k)functions})

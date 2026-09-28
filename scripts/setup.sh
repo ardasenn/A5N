@@ -96,6 +96,12 @@ if [ "$A5N_SYNC_ENABLED" = "yes" ]; then
   say "checking sync"
   git -C "$VAULT" remote get-url "$A5N_SYNC_REMOTE" >/dev/null 2>&1 \
     || die "sync is on but the vault has no git remote '$A5N_SYNC_REMOTE'. Add it: git -C \"$VAULT\" remote add $A5N_SYNC_REMOTE <url>"
+  # A run on any other branch skips everything, capture included, so a
+  # mismatch would otherwise surface only as the first unattended run's
+  # notification while the transcript deletion clock runs.
+  VAULT_BRANCH="$(git -C "$VAULT" symbolic-ref -q --short HEAD)"
+  [ "$VAULT_BRANCH" = "$A5N_SYNC_BRANCH" ] \
+    || die "sync is on but the vault is on branch '${VAULT_BRANCH:-(detached HEAD)}' and sync.branch is '$A5N_SYNC_BRANCH'. Check it out (git -C \"$VAULT\" checkout $A5N_SYNC_BRANCH) or change sync.branch"
   if [ -n "$A5N_SYNC_RAW_REMOTE" ]; then
     command -v rclone >/dev/null 2>&1 \
       || die "sync.raw_remote is set but rclone is not installed"

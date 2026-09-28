@@ -182,9 +182,11 @@ sync_fetch() {
 
 # rclone copy --immutable never deletes and never overwrites: a raw file is
 # written once under a unique name, so there is nothing to reconcile.
-# .gitkeep placeholders stay out, because to --immutable an mtime change on
-# one is a modification (exit code 6 on a real vault). 0 every namespace
-# copied; 1 at least one failed, and the user was told.
+# Dotfiles stay out: the .gitkeep placeholders, and the .DS_Store Finder
+# drops into any folder it shows. Both get rewritten, and to --immutable a
+# rewritten file is a modified one (exit code 6 on a real vault), an alarm
+# that would then fire on every run. A raw file is never a dotfile. 0 every
+# namespace copied; 1 at least one failed, and the user was told.
 sync_raw() {  # <down|up>
   [ -n "${A5N_SYNC_RAW_REMOTE:-}" ] || return 0
   local ns src dst rc failed=""
@@ -197,7 +199,7 @@ sync_raw() {  # <down|up>
       src="$VAULT/$ns/raw"
       dst="$A5N_SYNC_RAW_REMOTE/$ns/raw"
     fi
-    sync_bounded "$SYNC_RCLONE_TIMEOUT" rclone copy --immutable --exclude .gitkeep "$src" "$dst" >> "$LOG" 2>&1
+    sync_bounded "$SYNC_RCLONE_TIMEOUT" rclone copy --immutable --exclude '.*' "$src" "$dst" >> "$LOG" 2>&1
     rc=$?
     # 3 is rclone's "directory not found": nothing uploaded for it yet.
     [ "$1" = down ] && [ "$rc" -eq 3 ] && rc=0

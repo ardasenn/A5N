@@ -199,8 +199,9 @@ zsh scripts/setup.sh
 ```
 
 `setup.sh` bir şey kurmadan önce git remote'unun ve rclone remote'unun var
-olduğunu kontrol eder. Git sunucunun dal ve etiket dışındaki ref'leri kabul
-etmesi gerekir; etmiyorsa ilk koşu bunu sana söyler.
+olduğunu, vault'un da sync dalında durduğunu kontrol eder. Git sunucunun dal
+ve etiket dışındaki ref'leri kabul etmesi gerekir; etmiyorsa ilk koşu bunu
+sana söyler.
 
 ## Geri okumak
 

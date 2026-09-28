@@ -194,9 +194,10 @@ cp config.example.ini config.ini   # in the A5N checkout: [sync] as above
 zsh scripts/setup.sh
 ```
 
-`setup.sh` checks that the git remote and the rclone remote exist before it
-installs anything. Your git host has to accept refs outside branches and
-tags; if it does not, the first run tells you.
+`setup.sh` checks that the git remote and the rclone remote exist, and that
+the vault is on the sync branch, before it installs anything. Your git host
+has to accept refs outside branches and tags; if it does not, the first run
+tells you.
 
 ## Reading it back
 
