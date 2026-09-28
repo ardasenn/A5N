@@ -24,12 +24,16 @@ humans too. The short version:
 
 ## Testing a change
 
-There is no test suite yet. Before opening a PR:
+Before opening a PR:
 
 ```bash
 python3 -m py_compile scripts/*.py
-zsh -n scripts/*.sh
+for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do zsh -n "$f"; done
+zsh tests/sync-e2e.sh
 ```
+
+`tests/sync-e2e.sh` runs on Linux with rclone installed and works in a
+temporary directory only.
 
 Then point a scratch config at a throwaway vault and exercise what you
 changed for real:

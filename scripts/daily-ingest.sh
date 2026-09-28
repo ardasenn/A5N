@@ -32,6 +32,12 @@
 #
 # Testing: point A5N_CONFIG at a scratch config, and use A5N_MAX_UNITS /
 # A5N_UNIT_TIMEOUT / A5N_NO_NOTIFY to keep the run small and quiet.
+#
+# With [sync] enabled the run also pulls before work, copies raw files both
+# ways, pushes after every commit and holds a lock ref on the remote while
+# workers run; scripts/lib/sync.sh has the details and the reasons.
+# A5N_SYNC_WAIT / A5N_SYNC_POLL / A5N_SYNC_RETRY_DELAY shorten its waits in
+# tests.
 set -u
 
 SCRIPT_DIR="${0:A:h}"
@@ -64,11 +70,16 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 # visible.
 notify_fail() {
   log "FAILED: $1"
-  [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
-  if [ "$(uname)" = "Darwin" ]; then
-    /usr/bin/osascript -e "display notification \"$1\" with title \"A5N ingest\"" >/dev/null 2>&1
-  fi
+  a5n_desktop_notify "A5N ingest" "$1"
 }
+
+# Shared with the other drivers: the notification itself and the
+# interrupted unit flag.
+source "$SCRIPT_DIR/lib/common.sh"
+
+# Keeps the vault in step with other machines; every call is a no-op while
+# [sync] is off.
+source "$SCRIPT_DIR/lib/sync.sh"
 
 # Undo a failed unit's leftovers. The unit started on a clean tree and its
 # siblings were committed immediately, so the scope is AT MOST one unit. The
@@ -148,11 +159,24 @@ fi
 # If the script dies early the watchdog subshell must not outlive it, or it
 # would later try to kill a pid that no longer belongs to us.
 cleanup() {
+  sync_lock_release
   rm -f "$LOCK"
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
   return 0
 }
 trap cleanup EXIT
+# A stop from the service manager (systemctl stop, launchctl bootout, a
+# shutdown) arrives as TERM, and zsh skips the EXIT trap when a signal it
+# does not trap ends it: the remote lock stayed on the remote and the
+# other machine treated it as busy for two hours. Exiting from a trap
+# runs cleanup. INT and HUP are the same stop for a run started by hand.
+# The worker is stopped first: started with & by a non-interactive shell
+# it ignores INT, and a kill of the driver alone never reaches it, so the
+# released locks would otherwise sit next to a worker still writing.
+stop_worker() { [ -n "${AGENT_PID:-}" ] && kill -TERM "$AGENT_PID" 2>/dev/null; }
+trap 'stop_worker; exit 143' TERM
+trap 'stop_worker; exit 130' INT
+trap 'stop_worker; exit 129' HUP
 print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
@@ -162,6 +186,13 @@ if [ ! -s "$UNIT_PROMPT_FILE" ]; then
   exit 1
 fi
 
+# Before anything writes: with sync, A5N's own interrupted rebase is undone
+# and a user's unfinished git operation or another branch stops the run;
+# then a unit a killed run left half written goes to the stash, so the
+# commit below cannot sweep it in as manual edits.
+sync_recover || exit 0
+recover_interrupted_unit || exit 1
+
 # Hand written vault edits should not be mixed into ingest commits. Commit
 # them separately under an honest message.
 if [ -n "$(git status --porcelain)" ]; then
@@ -169,6 +200,11 @@ if [ -n "$(git status --porcelain)" ]; then
   git add -A >> "$LOG" 2>&1
   git commit -m "chore: manual vault changes (pre-ingest $(date +%F))" >> "$LOG" 2>&1
 fi
+
+# With sync: pull, download the other machine's raw files, try the remote
+# lock. Capture below runs whatever this finds; it is the only step with a
+# deadline.
+sync_begin ingest yes yes
 
 # ---- Layer 1: capture (deterministic) --------------------------------------
 log "layer 1: capture started"
@@ -184,16 +220,34 @@ if [ -n "$(git status --porcelain)" ]; then
   log "raw capture committed"
 fi
 
+# Raw files up, then the commits out, lock or no lock: none of this can race
+# the other machine's workers.
+sync_publish
+
 # ---- Layer 2: one worker per unit ------------------------------------------
 # The queue step is checked like capture: an ignored crash here would print
 # "healthy day" forever while unprocessed raws pile up in silence.
-if ! python3 "$SCRIPT_DIR/ingest-discover.py" queue > "$QTSV" 2>> "$LOG"; then
-  notify_fail "queue step failed, see .a5n-logs/$(date +%F).log"
-  exit 1
-fi
+build_queue() {
+  if ! python3 "$SCRIPT_DIR/ingest-discover.py" queue > "$QTSV" 2>> "$LOG"; then
+    notify_fail "queue step failed, see .a5n-logs/$(date +%F).log"
+    exit 1
+  fi
+}
+build_queue
 if [ ! -s "$QTSV" ]; then
   log "queue empty, model never invoked, healthy day"
   exit 0
+fi
+# Workers only run in step with the remote and, with the lock on, while
+# holding it. A lock that arrives after a wait means the other machine may
+# have processed some of these units meanwhile, so the queue is rebuilt.
+sync_ready_for_workers || exit 0
+if [ "$SYNC_REQUEUE" = 1 ]; then
+  build_queue
+  if [ ! -s "$QTSV" ]; then
+    log "queue empty after the other machine's run, healthy day"
+    exit 0
+  fi
 fi
 
 OK=0; FAIL=0; CONSEC_ERR=0
@@ -226,6 +280,9 @@ PYEOF
   # closes within the run instead of the queue chewing on the same unit for
   # days. Observed: of five same shaped units, two passed first try and
   # three had skipped the full id trace.
+  # From here until the commit or rollback below, a kill leaves pages behind.
+  UNIT_BASE="$(git rev-parse HEAD)"
+  unit_begin "ingest $PROJ/${SID:0:8}"
   UNIT_DONE=""; VREASON=""
   for ATTEMPT in 1 2; do
     FULL_PROMPT="$PROMPT"
@@ -260,6 +317,9 @@ leave no out of schema path. Every other rule still applies."
     ) &
     WATCHDOG_PID=$!
     wait "$AGENT_PID"; AGENT_EXIT=$?
+    # Reaped, and a reaped pid can be reused: the stop trap must not
+    # signal it.
+    AGENT_PID=""
     kill "$WATCHDOG_PID" 2>/dev/null; WATCHDOG_PID=""
     cat "$OUT" >> "$LOG"
 
@@ -292,6 +352,16 @@ leave no out of schema path. Every other rule still applies."
     log "verification REJECTED (attempt $ATTEMPT): $PROJ/$SID, rolled back"
     rollback_unit
   done
+  unit_end
+
+  # With sync the commit leaves at once. A conflict drops it (the unit stays
+  # queued); an unreachable remote keeps it and stops layer 2.
+  PUSH_RC=0
+  if [ -n "$UNIT_DONE" ]; then
+    sync_push_unit "$UNIT_BASE"
+    PUSH_RC=$?
+    [ "$PUSH_RC" -eq 2 ] && UNIT_DONE=""
+  fi
 
   if [ -n "$UNIT_DONE" ]; then
     OK=$((OK+1))
@@ -302,7 +372,11 @@ leave no out of schema path. Every other rule still applies."
       break
     fi
   fi
+  [ "$PUSH_RC" -eq 1 ] && break
   touch "$LOCK"
+  # The remote lock's twin of the touch above. A lock lost to another
+  # machine stops layer 2.
+  sync_lock_refresh || break
 done < "$QTSV"
 
 log "run finished: $OK done, $FAIL failed"

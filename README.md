@@ -130,6 +130,75 @@ zsh scripts/weekly-lint.sh     # what it runs weekly
 Both are safe to run by hand at any time. They take a lock, so a manual run and
 a scheduled one cannot collide.
 
+## Two machines, one vault
+
+One vault can live on two machines, say a work desktop and a personal
+laptop. Each machine has its own A5N checkout and its own `config.ini`,
+listing the projects whose transcripts live there. Pages travel through a
+private git remote. Raw transcripts travel with them or, when they are too
+big for git, through any storage rclone can reach, every machine keeping a
+full copy.
+
+Turn it on in `config.ini` on both machines:
+
+```ini
+[sync]
+enabled = yes
+remote = origin
+branch = main
+raw_remote = gdrive:my-vault
+lock = yes
+```
+
+`remote` and `branch` name the vault's git remote. `raw_remote` is an rclone
+path; each project's raw files live under `<raw_remote>/<project>/raw`.
+Leave it empty to keep raw files in git. When you set it, add `**/raw/` to
+the vault's `.gitignore`, or raw files travel twice.
+
+With sync on, every run:
+
+1. pulls first (a fetch, then a rebase of any local commits),
+2. downloads the raw files the other machine added,
+3. captures new sessions, uploads raw files, then pushes,
+4. takes a lock on the remote before any model worker starts, and pushes
+   after every processed session.
+
+The lock is a ref on the remote, `refs/a5n/lock`, created only if it does
+not exist yet, so when both machines start at once exactly one runs
+workers. The other still captures and pushes, then waits up to an hour for
+the lock. The lock is refreshed after every session, and one older than two
+hours is treated as left behind by a crash.
+
+Nothing is ever deleted or overwritten on either side: raw files are copied
+with `rclone copy --immutable`, and pushes are never forced. `log.md` files
+only ever grow, so when both machines added lines, both are kept (setup
+writes that rule into the vault's `.git/info/attributes`). Any other conflict
+stops that machine's workers and notifies you. A session whose push
+conflicts is dropped and processed again on the next run.
+
+When the remote cannot be reached, the run still captures and commits
+locally, skips the workers, and pushes next time. If sync keeps failing for
+more than a day, you get a notification.
+
+On the second machine, set `lint = off` and `digest = off` in `[schedule]`:
+lint reports and digests are rewritten whole, so one machine should own
+them. Give the two machines different ingest times too, or one of them will
+spend its run waiting for the other's lock.
+
+To add the second machine, clone the vault, write its `config.ini` and run
+setup. Its first run downloads the raw files.
+
+```bash
+git clone <your vault's remote> ~/knowledge-vault
+cp config.example.ini config.ini   # in the A5N checkout: [sync] as above
+zsh scripts/setup.sh
+```
+
+`setup.sh` checks that the git remote and the rclone remote exist, and that
+the vault is on the sync branch, before it installs anything. Your git host
+has to accept refs outside branches and tags; if it does not, the first run
+tells you.
+
 ## Reading it back
 
 Writing pages is only half the job: your agents also need to read them. A5N
@@ -219,6 +288,12 @@ writes pages.
   overlap another. A lock older than two hours is treated as dead, because a
   crash cannot run the cleanup trap and a stale lock would silently swallow
   every later run.
+- With sync on, the lock has a second half: a ref on the git remote that
+  only one machine at a time can hold while model workers run. It is
+  refreshed after every session, so a long run never looks abandoned.
+- A run killed in the middle of a session leaves a marker behind. The next
+  run moves the half written pages to `git stash` instead of committing
+  them as if you had written them.
 - A watchdog kills a worker that exceeds its per unit wall clock. Not a work
   limit, only a guard against hanging forever.
 - Skipping is never silent. When a session is dropped for being too small or

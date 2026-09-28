@@ -49,11 +49,16 @@ log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
 
 notify_fail() {
   log "FAILED: $1"
-  [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
-  if [ "$(uname)" = "Darwin" ]; then
-    /usr/bin/osascript -e "display notification \"$1\" with title \"A5N lint\"" >/dev/null 2>&1
-  fi
+  a5n_desktop_notify "A5N lint" "$1"
 }
+
+# Shared with the other drivers: the notification itself and the
+# interrupted unit flag.
+source "$SCRIPT_DIR/lib/common.sh"
+
+# Keeps the vault in step with other machines; every call is a no-op while
+# [sync] is off.
+source "$SCRIPT_DIR/lib/sync.sh"
 
 rollback_unit() {
   git reset --hard --quiet >> "$LOG" 2>&1
@@ -123,11 +128,19 @@ if [ -e "$LOCK" ]; then
   fi
 fi
 cleanup() {
+  sync_lock_release
   rm -f "$LOCK"
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
   return 0
 }
 trap cleanup EXIT
+# Stop signals stop the worker, then exit through cleanup, so the remote
+# lock is released and no worker outlives it: the reasons are in
+# daily-ingest.sh.
+stop_worker() { [ -n "${AGENT_PID:-}" ] && kill -TERM "$AGENT_PID" 2>/dev/null; }
+trap 'stop_worker; exit 143' TERM
+trap 'stop_worker; exit 130' INT
+trap 'stop_worker; exit 129' HUP
 print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
@@ -137,6 +150,13 @@ if [ ! -s "$PROMPT_FILE" ]; then
   exit 1
 fi
 
+# Before anything writes: with sync, A5N's own interrupted rebase is undone
+# and a user's unfinished git operation or another branch stops the run;
+# then a unit a killed run left half written goes to the stash, so the
+# commit below cannot sweep it in as manual edits.
+sync_recover || exit 0
+recover_interrupted_unit || exit 1
+
 # Hand written edits should not be mixed into lint commits.
 if [ -n "$(git status --porcelain)" ]; then
   log "WARNING: vault dirty before lint, committing manual edits separately"
@@ -144,7 +164,25 @@ if [ -n "$(git status --porcelain)" ]; then
   git commit -m "chore: manual vault changes (pre-lint $(date +%F))" >> "$LOG" 2>&1
 fi
 
+# With sync: pull, the raw download, then the remote lock. Every lint step
+# edits or reports on pages, so none of it may run next to the other
+# machine's workers. The lint already notifies when the local lock makes it
+# skip, and these skips follow suit.
+sync_begin lint yes yes
+case "$SYNC_STATE" in
+  offline)
+    notify_fail "lint skipped: $A5N_SYNC_REMOTE unreachable; by hand later: scripts/weekly-lint.sh"
+    exit 0 ;;
+  blocked) exit 0 ;;
+esac
+if ! sync_ready_for_workers; then
+  notify_fail "lint skipped: $SYNC_SKIP_REASON; by hand later: scripts/weekly-lint.sh"
+  exit 0
+fi
+
 # --- 1+2. Mechanical layer (deterministic) ----------------------------------
+UNIT_BASE="$(git rev-parse HEAD)"
+unit_begin "lint mechanical repairs"
 log "fix-links started"
 FIX_OUT="$(python3 "$SCRIPT_DIR/fix-links.py" 2>>"$LOG")"
 FIX_RC=$?
@@ -152,6 +190,7 @@ echo "$FIX_OUT" >> "$LOG"
 if [ "$FIX_RC" -ne 0 ]; then
   notify_fail "fix-links.py failed (rc=$FIX_RC), lint cancelled, leftovers reverted"
   rollback_unit
+  unit_end
   exit 1
 fi
 echo "$FIX_OUT" | head -1 > "$MECHDIR/last-fix-count.txt"
@@ -160,6 +199,7 @@ log "lint-mech started"
 if ! python3 "$SCRIPT_DIR/lint-mech.py" "$MECHDIR" >> "$LOG" 2>&1; then
   notify_fail "lint-mech.py failed, lint cancelled, leftovers reverted"
   rollback_unit
+  unit_end
   exit 1
 fi
 
@@ -168,6 +208,14 @@ if [ -n "$(git status --porcelain)" ]; then
   git commit -m "chore: lint mechanical link repairs $(date +%F)" >> "$LOG" 2>&1
   log "mechanical repairs committed"
 fi
+unit_end
+sync_push_unit "$UNIT_BASE"
+case $? in
+  1)
+    log "lint stopped: the remote cannot take pushes now, the commits wait for the next run"
+    exit 0 ;;
+  2) log "mechanical repairs dropped after a conflict, next week's run redoes them" ;;
+esac
 
 # --- 3. Semantic lint: one worker per project -------------------------------
 # The namespace list is dynamic: every vault root directory holding a
@@ -191,6 +239,8 @@ sys.stdout.write(t)
 PYEOF
 )"
 
+  UNIT_BASE="$(git rev-parse HEAD)"
+  unit_begin "lint $PROJ"
   UNIT_DONE=""; VREASON=""
   for ATTEMPT in 1 2; do
     FULL_PROMPT="$PROMPT"
@@ -221,6 +271,9 @@ report file must have been written."
     ) &
     WATCHDOG_PID=$!
     wait "$AGENT_PID"; AGENT_EXIT=$?
+    # Reaped, and a reaped pid can be reused: the stop trap must not
+    # signal it.
+    AGENT_PID=""
     kill "$WATCHDOG_PID" 2>/dev/null; WATCHDOG_PID=""
     cat "$OUT" >> "$LOG"
 
@@ -267,6 +320,16 @@ report file must have been written."
     log "verification REJECTED (attempt $ATTEMPT): $PROJ, $VREASON"
     rollback_unit
   done
+  unit_end
+
+  # Same rules as the ingest: a conflict drops the report (next week redoes
+  # it), an unreachable remote keeps it and stops.
+  PUSH_RC=0
+  if [ -n "$UNIT_DONE" ]; then
+    sync_push_unit "$UNIT_BASE"
+    PUSH_RC=$?
+    [ "$PUSH_RC" -eq 2 ] && UNIT_DONE=""
+  fi
 
   if [ -n "$UNIT_DONE" ]; then
     OK=$((OK+1))
@@ -277,7 +340,9 @@ report file must have been written."
       break
     fi
   fi
+  [ "$PUSH_RC" -eq 1 ] && break
   touch "$LOCK"
+  sync_lock_refresh || break
 done
 
 log "lint finished: $OK done, $FAIL failed"

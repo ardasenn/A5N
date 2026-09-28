@@ -49,6 +49,13 @@ DEFAULTS = {
         "max_units": "15",
         "condense_over_kb": "2048",
     },
+    "sync": {
+        "enabled": "no",
+        "remote": "origin",
+        "branch": "main",
+        "raw_remote": "",
+        "lock": "yes",
+    },
 }
 
 
@@ -93,6 +100,7 @@ def load(path=None):
 
     _validate_runner(cfg["runner"])
     _validate_schedule(cfg["schedule"])
+    _validate_sync(cfg["sync"])
 
     cfg["_projects"] = _projects(parser)
     cfg["_config_path"] = str(path)
@@ -107,9 +115,16 @@ def _validate_schedule(schedule):
     """A typo here is worse than a failed run: an unparseable schedule used
     to reach setup.sh, whose calendar_keys died only inside a command
     substitution, and the job was installed with an EMPTY launchd calendar,
-    which launchd reads as "fire every minute"."""
+    which launchd reads as "fire every minute".
+
+    "off" keeps one job off this machine while the others run: a second
+    machine sharing a vault leaves lint and digest to the first, because
+    both rewrite their output whole."""
     for job in ("ingest", "lint", "digest"):
         spec = schedule[job].strip()
+        if spec.lower() == "off":
+            schedule[job] = "off"
+            continue
         m = SCHEDULE_RX.match(spec)
         day_ok = True
         if m and m.group(1) and m.group(1).isdigit():
@@ -117,10 +132,35 @@ def _validate_schedule(schedule):
         if not m or not day_ok:
             raise ConfigError(
                 f"schedule.{job} '{schedule[job]}' is not valid. Use HH:MM "
-                f"(daily), 'sun HH:MM' (weekly) or '1 HH:MM' (day of "
-                f"month, 1-31)."
+                f"(daily), 'sun HH:MM' (weekly), '1 HH:MM' (day of "
+                f"month, 1-31) or off."
             )
         schedule[job] = spec
+
+
+def _yes_no(key, value):
+    v = value.strip().lower()
+    if v not in ("yes", "no"):
+        raise ConfigError(
+            f"{key} is '{value}', must be exactly 'yes' or 'no'.")
+    return v
+
+
+def _validate_sync(sync):
+    """Closed values on purpose: "enabled = true" would otherwise leave sync
+    silently off while the user believes both machines are in step."""
+    sync["enabled"] = _yes_no("sync.enabled", sync["enabled"])
+    sync["lock"] = _yes_no("sync.lock", sync["lock"])
+    for key in ("remote", "branch"):
+        value = sync[key].strip()
+        if sync["enabled"] == "yes" and (
+                not value or any(c.isspace() for c in value)):
+            raise ConfigError(
+                f"sync.{key} '{value}' must be one word when sync is "
+                f"enabled.")
+        sync[key] = value
+    raw = sync["raw_remote"].strip()
+    sync["raw_remote"] = raw.rstrip("/") or raw
 
 
 # Effort is a closed list per engine and IS validated, because a typo here
@@ -232,6 +272,11 @@ def _emit_shell(cfg):
         "A5N_SCHEDULE_INGEST": cfg["schedule"]["ingest"],
         "A5N_SCHEDULE_LINT": cfg["schedule"]["lint"],
         "A5N_SCHEDULE_DIGEST": cfg["schedule"]["digest"],
+        "A5N_SYNC_ENABLED": cfg["sync"]["enabled"],
+        "A5N_SYNC_REMOTE": cfg["sync"]["remote"],
+        "A5N_SYNC_BRANCH": cfg["sync"]["branch"],
+        "A5N_SYNC_RAW_REMOTE": cfg["sync"]["raw_remote"],
+        "A5N_SYNC_LOCK": cfg["sync"]["lock"],
         "A5N_MIN_SESSION_KB": cfg["limits"]["min_session_kb"],
         "A5N_SETTLE_HOURS": cfg["limits"]["settle_hours"],
         "A5N_UNIT_TIMEOUT": cfg["limits"]["unit_timeout"],
@@ -299,6 +344,13 @@ def main(argv):
             return 1
         print(f"runner: {cfg['runner']['engine']} ({resolved}), "
               f"model {cfg['runner']['model']}, effort {effort}")
+        sync = cfg["sync"]
+        if sync["enabled"] == "yes":
+            lock = "on" if sync["lock"] == "yes" else "off"
+            print(f"sync: on, pages via {sync['remote']}/{sync['branch']}, "
+                  f"raw files via {sync['raw_remote'] or 'git'}, lock {lock}")
+        else:
+            print("sync: off")
         stale = [k for k in ("claude_bin", "model") if k in cfg["agents"]]
         if "run_timeout" in cfg["limits"]:
             stale.append("run_timeout")
