@@ -133,6 +133,75 @@ zsh scripts/weekly-lint.sh     # haftalık koştuğu
 İkisi de istediğin an elle çalıştırılabilir. Kilit aldıkları için elle koşu ile
 zamanlanmış koşu çakışamaz.
 
+## İki makine, tek vault
+
+Tek bir vault iki makinede yaşayabilir, örneğin iş masaüstünde ve şahsi
+dizüstünde. Her makinenin kendi A5N klonu ve kendi `config.ini`'si olur;
+config'te o makinede transkripti oluşan projeler yer alır. Sayfalar özel bir
+git remote'u üzerinden taşınır. Ham transkriptler de onlarla birlikte gider
+ya da, git için fazla büyüklerse, rclone'un ulaşabildiği herhangi bir
+depolama üzerinden taşınır; her makine tam bir kopya tutar.
+
+İki makinede de `config.ini`'de açarsın:
+
+```ini
+[sync]
+enabled = yes
+remote = origin
+branch = main
+raw_remote = gdrive:my-vault
+lock = yes
+```
+
+`remote` ve `branch` vault'un git remote'unu gösterir. `raw_remote` bir
+rclone yoludur; her projenin ham dosyaları `<raw_remote>/<proje>/raw`
+altında durur. Ham dosyalar git'te kalsın istiyorsan boş bırak. Doldurursan
+vault'un `.gitignore`'una `**/raw/` ekle, yoksa ham dosyalar iki yoldan
+birden gider.
+
+Sync açıkken her koşu:
+
+1. önce çeker (bir fetch, ardından yerel commit'lerin rebase'i),
+2. diğer makinenin eklediği ham dosyaları indirir,
+3. yeni oturumları yakalar, ham dosyaları yükler, sonra push eder,
+4. herhangi bir model işçisi başlamadan remote'ta bir kilit alır ve işlenen
+   her oturumdan sonra push eder.
+
+Kilit remote'ta bir ref'tir, `refs/a5n/lock`, ve sadece henüz yoksa
+oluşturulur; iki makine aynı anda başlarsa işçileri tam olarak biri
+koşturur. Diğeri yine yakalar ve push eder, sonra kilidi bir saate kadar
+bekler. Kilit her oturumdan sonra tazelenir; iki saatten eski bir kilit,
+çöken bir koşudan kalmış sayılır.
+
+İki tarafta da hiçbir şey silinmez ya da üzerine yazılmaz: ham dosyalar
+`rclone copy --immutable` ile kopyalanır, push'lar asla zorlanmaz. `log.md`
+dosyaları sadece büyür, iki makine de satır eklediyse ikisi de tutulur
+(setup bu kuralı vault'un `.git/info/attributes` dosyasına yazar). Başka her
+çakışma o makinenin işçilerini durdurur ve sana bildirim gönderir. Push'u
+çakışan bir oturum düşürülür ve bir sonraki koşuda yeniden işlenir.
+
+Remote'a ulaşılamazsa koşu yine yakalar ve yerelde commit'ler, işçileri
+atlar, bir sonraki seferde push eder. Senkron bir günden uzun süre başarısız
+olmaya devam ederse bildirim gelir.
+
+İkinci makinede `[schedule]` içinde `lint = off` ve `digest = off` yap: lint
+raporları ve digest'ler baştan yazılır, dolayısıyla tek bir makinenin işi
+olmalı. İki makinenin ingest saatlerini de farklı yap, yoksa biri koşusunu
+diğerinin kilidini bekleyerek geçirir.
+
+İkinci makineyi eklemek için vault'u klonla, o makinenin `config.ini`'sini
+yaz ve setup'ı çalıştır. İlk koşusu ham dosyaları indirir.
+
+```bash
+git clone <vault'unun remote'u> ~/knowledge-vault
+cp config.example.ini config.ini   # A5N klonunda: [sync] yukarıdaki gibi
+zsh scripts/setup.sh
+```
+
+`setup.sh` bir şey kurmadan önce git remote'unun ve rclone remote'unun var
+olduğunu kontrol eder. Git sunucunun dal ve etiket dışındaki ref'leri kabul
+etmesi gerekir; etmiyorsa ilk koşu bunu sana söyler.
+
 ## Geri okumak
 
 Sayfa yazmak işin yarısı: ajanların onları okuyabilmesi de gerek. A5N bunun
@@ -222,6 +291,13 @@ ve sayfa yazar.
   dolayısıyla hiçbiri diğeriyle çakışamaz. İki saatten eski kilit ölü
   sayılır, çünkü çöken bir süreç temizlik trap'ini çalıştıramaz ve ölü kilit
   sonraki tüm koşuları sessizce yutar.
+- Sync açıkken kilidin ikinci bir yarısı olur: git remote'unda, model
+  işçileri koşarken aynı anda sadece bir makinenin tutabildiği bir ref. Her
+  oturumdan sonra tazelenir, dolayısıyla uzun bir koşu asla terk edilmiş
+  görünmez.
+- Bir oturumun ortasında öldürülen koşu arkasında bir işaret bırakır.
+  Sonraki koşu yarım yazılmış sayfaları, sen yazmışsın gibi commit'lemek
+  yerine `git stash`'e kaldırır.
 - Watchdog, birim başına duvar saatini aşan işçiyi keser. Bu bir iş sınırı
   değil, sadece sonsuza asılmaya karşı bir koruma.
 - Atlama asla sessiz olmaz. Küçük ya da kopya olduğu için elenen her oturum

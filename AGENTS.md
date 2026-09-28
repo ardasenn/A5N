@@ -12,7 +12,9 @@ scripts/config.py    the only place that reads config.ini
 scripts/*.sh         the unattended run drivers (deterministic orchestration)
 scripts/ingest-*.py  discovery and capture, queue, artifact verification
 scripts/*.py         transcript handling and mechanical lint
+scripts/lib/         functions the drivers source: sync, notification, unit flag
 scripts/prompts/     what one headless worker is told, English only
+tests/               end to end tests, scratch directories only
 template/            copied into a new vault by setup.sh
 example/             invented sample output, referenced from the README
 ```
@@ -49,13 +51,21 @@ user may have edited.
 
 ## Testing a change
 
-There is no test suite yet. At minimum, before committing:
+Before committing:
 
 ```bash
 python3 -m py_compile scripts/*.py
-zsh -n scripts/*.sh
+for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do zsh -n "$f"; done
 python3 scripts/config.py --check      # against a scratch config.ini
+zsh tests/sync-e2e.sh                  # Linux, needs rclone; scratch only
 ```
+
+`zsh -n` checks one file per call: with several arguments it parses the
+first and passes the rest to it as arguments. `tests/sync-e2e.sh` builds
+throwaway worlds (a bare repository as the remote, an rclone local remote as
+storage, a fake model runner) and never touches a real vault, timer or
+remote. `A5N_BASELINE_REF=<commit>` adds the check that sync off still
+produces that commit's exact history.
 
 For a real end to end run, point a scratch config at a throwaway vault path
 and run the ingest by hand. Never test against a vault that holds real work.
