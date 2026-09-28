@@ -854,6 +854,40 @@ t_digest_sync() {
   mv "$W/origin.away" "$W/origin.git"
 }
 
+t_sync_off_identical() {
+  local ref="${A5N_BASELINE_REF:-}" base="$TOP/baseline" side scripts
+  if [ -z "$ref" ]; then
+    print -r -- "  skip  set A5N_BASELINE_REF to the commit to compare against"
+    return 0
+  fi
+  mkdir -p "$base"
+  if ! git -C "$REPO" archive "$ref" | tar -x -C "$base"; then
+    bad "cannot extract $ref"
+    return
+  fi
+  for side in old new; do
+    world "identical-$side"
+    machine_config m1 off yes alpha beta
+    session m1 alpha "$A1" 2026-09-01
+    session m1 alpha "$A2" 2026-09-02
+    session m1 beta "$B1" 2026-09-04
+    session m1 beta "$S1" 2026-09-03 small
+    scripts="$REPO/scripts"
+    [ "$side" = old ] && scripts="$base/scripts"
+    A5N_CONFIG="$W/m1/config.ini" zsh "$scripts/setup.sh" > /dev/null 2>&1
+    A5N_CONFIG="$W/m1/config.ini" zsh "$scripts/daily-ingest.sh"
+    A5N_CONFIG="$W/m1/config.ini" zsh "$scripts/weekly-lint.sh"
+    A5N_CONFIG="$W/m1/config.ini" zsh "$scripts/digest.sh" > /dev/null
+    git -C "$W/m1/vault" log --reverse --format='%s %T' > "$TOP/identical-$side.log"
+  done
+  check "the runs made commits" test "$(wc -l < "$TOP/identical-new.log")" -ge 6
+  check_eq "same commits, same trees" "$(cat "$TOP/identical-old.log")" "$(cat "$TOP/identical-new.log")"
+  check_eq "no network call before the change" "" \
+    "$(cat "$TOP/identical-old/calls/git-net.log" "$TOP/identical-old/calls/rclone.log" 2>/dev/null)"
+  check_eq "no network call after the change" "" \
+    "$(cat "$TOP/identical-new/calls/git-net.log" "$TOP/identical-new/calls/rclone.log" 2>/dev/null)"
+}
+
 # --- runner ------------------------------------------------------------------
 # Every function named t_<scenario> is a scenario; each builds its own world.
 SCENARIOS=(${(k)functions})
