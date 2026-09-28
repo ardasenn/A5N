@@ -23,7 +23,12 @@ say "vault: $VAULT"
 
 # --- vault skeleton -------------------------------------------------------
 mkdir -p "$VAULT"/{patterns,chess-moves,digests,.a5n-logs}
-touch "$VAULT/patterns/.gitkeep" "$VAULT/chess-moves/.gitkeep" "$VAULT/digests/.gitkeep"
+# Placeholders are created once and never touched again: touch refreshed an
+# existing one's mtime on every run, and rclone copy --immutable reports a
+# file whose mtime changed as modified (exit code 6 on a real vault).
+for KEEP in "$VAULT/patterns/.gitkeep" "$VAULT/chess-moves/.gitkeep" "$VAULT/digests/.gitkeep"; do
+  [ -e "$KEEP" ] || : > "$KEEP"
+done
 
 render() {
   # render <template> <destination>. Substitutes {{TOKENS}}. Never overwrites.
@@ -60,7 +65,7 @@ python3 "$SCRIPT_DIR/config.py" --projects | while IFS=$'\t' read -r NAME MATCH 
   NS="$VAULT/$NAME"
   for dir in raw/sessions raw/docs sources/sessions entities concepts decisions bugs syntheses archive; do
     mkdir -p "$NS/$dir"
-    touch "$NS/$dir/.gitkeep"
+    [ -e "$NS/$dir/.gitkeep" ] || : > "$NS/$dir/.gitkeep"
   done
   for file in index log; do
     [ -f "$NS/$file.md" ] && continue
@@ -81,6 +86,40 @@ if [ ! -d "$VAULT/.git" ]; then
   git -C "$VAULT" add -A
   git -C "$VAULT" commit -qm "chore: vault created by A5N setup"
   say "git repository initialised"
+fi
+
+# --- sync -----------------------------------------------------------------
+# Checked here, before any timer is installed: a scheduled job that cannot
+# reach its remote would only fail later, unattended. The README section
+# "Two machines, one vault" explains the settings.
+if [ "$A5N_SYNC_ENABLED" = "yes" ]; then
+  say "checking sync"
+  git -C "$VAULT" remote get-url "$A5N_SYNC_REMOTE" >/dev/null 2>&1 \
+    || die "sync is on but the vault has no git remote '$A5N_SYNC_REMOTE'. Add it: git -C \"$VAULT\" remote add $A5N_SYNC_REMOTE <url>"
+  if [ -n "$A5N_SYNC_RAW_REMOTE" ]; then
+    command -v rclone >/dev/null 2>&1 \
+      || die "sync.raw_remote is set but rclone is not installed"
+    case "$A5N_SYNC_RAW_REMOTE" in
+      /*|:*) ;;  # a local path or an on the fly backend: nothing to look up
+      *:*)
+        RCLONE_NAME="${A5N_SYNC_RAW_REMOTE%%:*}:"
+        rclone listremotes 2>/dev/null | grep -qxF -- "$RCLONE_NAME" \
+          || die "rclone has no remote named '$RCLONE_NAME'. Create it with: rclone config" ;;
+    esac
+    FIRST_PROJECT="${${=A5N_PROJECT_NAMES}[1]}"
+    if ! git -C "$VAULT" check-ignore -q "$FIRST_PROJECT/raw/sessions/x.jsonl"; then
+      say "  warning: raw/ is tracked by git while sync.raw_remote is set, so raw files would travel twice. Add **/raw/ to the vault's .gitignore."
+    fi
+  fi
+  # log.md files only ever grow, so when both machines added lines the right
+  # merge keeps both. Machine local on purpose: the vault itself carries no
+  # .gitattributes, and every machine that syncs runs this setup anyway.
+  ATTR="$(git -C "$VAULT" rev-parse --git-path info/attributes)"
+  [[ "$ATTR" = /* ]] || ATTR="$VAULT/$ATTR"
+  mkdir -p "${ATTR:h}"
+  grep -qxF '**/log.md merge=union' "$ATTR" 2>/dev/null \
+    || print -r -- '**/log.md merge=union' >> "$ATTR"
+  say "  pages via $A5N_SYNC_REMOTE/$A5N_SYNC_BRANCH, raw files via ${A5N_SYNC_RAW_REMOTE:-git}"
 fi
 
 # --- scheduled jobs -------------------------------------------------------
@@ -126,6 +165,21 @@ PLIST
   fi
 }
 
+# A job set to off in config.ini: not installed on this machine, and removed
+# when an earlier setup installed it. A second machine sharing a vault turns
+# lint and digest off, because both rewrite their output whole.
+remove_launchd() {
+  local label="$1"
+  local plist="$HOME/Library/LaunchAgents/$1.plist"
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null
+  if [ -f "$plist" ]; then
+    rm -f "$plist"
+    say "  $label removed (off in config)"
+  else
+    say "  $label off"
+  fi
+}
+
 install_systemd() {
   local name="$1" script="$2" oncalendar="$3" description="$4"
   local dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -162,6 +216,19 @@ UNIT
     say "  $name.timer at $oncalendar"
   else
     say "  warning: systemctl refused $name.timer; inspect with: systemctl --user status $name.timer"
+  fi
+}
+
+remove_systemd() {
+  local name="$1"
+  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  if [ -f "$dir/$name.timer" ] || [ -f "$dir/$name.service" ]; then
+    systemctl --user disable --now "$name.timer" 2>/dev/null
+    rm -f "$dir/$name.timer" "$dir/$name.service"
+    systemctl --user daemon-reload 2>/dev/null
+    say "  $name.timer removed (off in config)"
+  else
+    say "  $name.timer off"
   fi
 }
 
@@ -232,30 +299,48 @@ systemd_calendar() {
   esac
 }
 
+# job, script, schedule and description, one row per scheduled job
+JOB_ROWS=(
+  ingest daily-ingest.sh "$A5N_SCHEDULE_INGEST" "A5N daily ingest"
+  lint weekly-lint.sh "$A5N_SCHEDULE_LINT" "A5N weekly lint"
+  digest digest.sh "$A5N_SCHEDULE_DIGEST" "A5N monthly digest"
+)
+
 if [ "$A5N_SCHEDULE_ENABLED" = "yes" ]; then
+  typeset -A CAL
   if [ "$(uname)" = "Darwin" ]; then
     say "installing scheduled jobs"
-    # calendar_keys output is captured and CHECKED before any plist is
-    # written: a die() inside $(...) only kills the subshell, and an empty
-    # calendar dict means "fire every minute" to launchd. config.py
-    # validates the schedule strings too; this is the second seatbelt.
-    CAL_INGEST="$(calendar_keys "$A5N_SCHEDULE_INGEST")" || die "invalid ingest schedule: $A5N_SCHEDULE_INGEST"
-    CAL_LINT="$(calendar_keys "$A5N_SCHEDULE_LINT")" || die "invalid lint schedule: $A5N_SCHEDULE_LINT"
-    CAL_DIGEST="$(calendar_keys "$A5N_SCHEDULE_DIGEST")" || die "invalid digest schedule: $A5N_SCHEDULE_DIGEST"
-    install_launchd "com.a5n.ingest" "$REPO/scripts/daily-ingest.sh" "$CAL_INGEST"
-    install_launchd "com.a5n.lint" "$REPO/scripts/weekly-lint.sh" "$CAL_LINT"
-    install_launchd "com.a5n.digest" "$REPO/scripts/digest.sh" "$CAL_DIGEST"
+    # Every calendar is computed and CHECKED before any plist is written: a
+    # die() inside $(...) only kills the subshell, and an empty calendar
+    # dict means "fire every minute" to launchd. config.py validates the
+    # schedule strings too; this is the second seatbelt.
+    for JOB SCRIPT SPEC DESC in "${JOB_ROWS[@]}"; do
+      [ "$SPEC" = off ] && continue
+      CAL[$JOB]="$(calendar_keys "$SPEC")" || die "invalid $JOB schedule: $SPEC"
+    done
+    for JOB SCRIPT SPEC DESC in "${JOB_ROWS[@]}"; do
+      if [ "$SPEC" = off ]; then
+        remove_launchd "com.a5n.$JOB"
+      else
+        install_launchd "com.a5n.$JOB" "$REPO/scripts/$SCRIPT" "${CAL[$JOB]}"
+      fi
+    done
   elif command -v systemctl >/dev/null 2>&1; then
     say "installing scheduled jobs"
     # Captured and CHECKED before any unit is written, for the same reason
     # the launchd branch above does it: a die() inside $(...) only kills the
     # subshell, and an empty OnCalendar makes systemd refuse the timer.
-    CAL_INGEST="$(systemd_calendar "$A5N_SCHEDULE_INGEST")" || die "invalid ingest schedule: $A5N_SCHEDULE_INGEST"
-    CAL_LINT="$(systemd_calendar "$A5N_SCHEDULE_LINT")" || die "invalid lint schedule: $A5N_SCHEDULE_LINT"
-    CAL_DIGEST="$(systemd_calendar "$A5N_SCHEDULE_DIGEST")" || die "invalid digest schedule: $A5N_SCHEDULE_DIGEST"
-    install_systemd "a5n-ingest" "$REPO/scripts/daily-ingest.sh" "$CAL_INGEST" "A5N daily ingest"
-    install_systemd "a5n-lint" "$REPO/scripts/weekly-lint.sh" "$CAL_LINT" "A5N weekly lint"
-    install_systemd "a5n-digest" "$REPO/scripts/digest.sh" "$CAL_DIGEST" "A5N monthly digest"
+    for JOB SCRIPT SPEC DESC in "${JOB_ROWS[@]}"; do
+      [ "$SPEC" = off ] && continue
+      CAL[$JOB]="$(systemd_calendar "$SPEC")" || die "invalid $JOB schedule: $SPEC"
+    done
+    for JOB SCRIPT SPEC DESC in "${JOB_ROWS[@]}"; do
+      if [ "$SPEC" = off ]; then
+        remove_systemd "a5n-$JOB"
+      else
+        install_systemd "a5n-$JOB" "$REPO/scripts/$SCRIPT" "${CAL[$JOB]}" "$DESC"
+      fi
+    done
     # User timers are torn down at logout unless lingering is on, which
     # turns a working install into one that only fires while you happen to
     # be logged in.
@@ -265,9 +350,10 @@ if [ "$A5N_SCHEDULE_ENABLED" = "yes" ]; then
     fi
   else
     say "no launchd and no systemd here. Add these to crontab yourself:"
-    say "  ingest at $A5N_SCHEDULE_INGEST -> $REPO/scripts/daily-ingest.sh"
-    say "  lint at $A5N_SCHEDULE_LINT     -> $REPO/scripts/weekly-lint.sh"
-    say "  digest at $A5N_SCHEDULE_DIGEST -> $REPO/scripts/digest.sh"
+    for JOB SCRIPT SPEC DESC in "${JOB_ROWS[@]}"; do
+      [ "$SPEC" = off ] && continue
+      say "  $JOB at $SPEC -> $REPO/scripts/$SCRIPT"
+    done
   fi
 else
   say "scheduling disabled in config, run the scripts by hand when you want them"

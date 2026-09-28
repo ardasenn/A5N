@@ -328,6 +328,66 @@ lint = sometimes"
     "schedule.lint 'sometimes' is not valid"
 }
 
+t_setup_checks() {
+  world setup
+  local v="$W/m1/vault" units="$W/xdg/systemd/user" out attr
+  local sched=$'enabled = yes\ningest = 09:07\nlint = off\ndigest = 1 09:37'
+  export XDG_CONFIG_HOME="$W/xdg"
+
+  # No remote: setup stops before any timer is touched.
+  CFG_SCHEDULE="$sched" machine_config m1 on yes alpha
+  mkdir -p "$v"
+  print -r -- $'.a5n-logs/\n**/raw/' > "$v/.gitignore"
+  git -C "$v" init -q -b main
+  out="$(a5n m1 setup.sh 2>&1)"
+  has "a missing remote stops setup" "$out" "sync is on but the vault has no git remote 'origin'"
+  check_eq "no timer was touched" "" "$(calls systemctl)"
+
+  # An rclone remote that does not exist.
+  git -C "$v" remote add origin "$W/origin.git"
+  CFG_RAW_REMOTE="nosuch:vault" CFG_SCHEDULE="$sched" machine_config m1 on yes alpha
+  out="$(a5n m1 setup.sh 2>&1)"
+  has "an unknown rclone remote stops setup" "$out" "rclone has no remote named 'nosuch:'"
+  check_eq "still no timer touched" "" "$(calls systemctl)"
+
+  # A lint timer from an earlier install, then a good config, twice.
+  mkdir -p "$units"
+  print -r -- "[Timer]" > "$units/a5n-lint.timer"
+  print -r -- "[Service]" > "$units/a5n-lint.service"
+  CFG_SCHEDULE="$sched" machine_config m1 on yes alpha
+  out="$(a5n m1 setup.sh 2>&1)"
+  has "the off timer is removed" "$out" "a5n-lint.timer removed (off in config)"
+  check "its timer file is gone" test ! -e "$units/a5n-lint.timer"
+  check "its service file is gone" test ! -e "$units/a5n-lint.service"
+  has "it was disabled" "$(calls systemctl)" "--user disable --now a5n-lint.timer"
+  has "ingest is installed" "$(calls systemctl)" "--user enable --now a5n-ingest.timer"
+  has "digest is installed" "$(calls systemctl)" "--user enable --now a5n-digest.timer"
+  has_not "lint is not installed" "$(calls systemctl)" "enable --now a5n-lint.timer"
+
+  touch -d '2020-01-02 03:04:05' "$v/alpha/raw/sessions/.gitkeep"
+  a5n m1 setup.sh > /dev/null 2>&1
+  attr="$(git -C "$v" rev-parse --git-path info/attributes)"
+  [[ "$attr" = /* ]] || attr="$v/$attr"
+  check_eq "the union line is written once" 1 "$(grep -cxF '**/log.md merge=union' "$attr")"
+  check_eq "root log.md merges by union" "log.md: merge: union" \
+    "$(git -C "$v" check-attr merge -- log.md)"
+  check_eq "project log.md merges by union" "alpha/log.md: merge: union" \
+    "$(git -C "$v" check-attr merge -- alpha/log.md)"
+  check_eq "an existing .gitkeep keeps its mtime" "2020-01-02 03:04:05" \
+    "$(date -r "$v/alpha/raw/sessions/.gitkeep" '+%F %T')"
+  check "the vault carries no .gitattributes" test ! -e "$v/.gitattributes"
+
+  # raw_remote while raw/ is tracked: a warning, not a stop.
+  machine_config m2 on yes alpha
+  mkdir -p "$W/m2/vault"
+  git -C "$W/m2/vault" init -q -b main
+  git -C "$W/m2/vault" remote add origin "$W/origin.git"
+  out="$(a5n m2 setup.sh 2>&1)"
+  has "tracked raw/ is warned about" "$out" "raw/ is tracked by git while sync.raw_remote is set"
+
+  export XDG_CONFIG_HOME="$HOME/.config"
+}
+
 # --- runner ------------------------------------------------------------------
 # Every function named t_<scenario> is a scenario; each builds its own world.
 SCENARIOS=(${(k)functions})
