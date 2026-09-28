@@ -656,6 +656,159 @@ t_bounded() {
   check_eq "a finished command keeps its exit status" 7 "$?"
 }
 
+lock_try() {  # <machine>: one attempt through the library, prints taken or busy
+  (
+    cd "$W/$1/vault" || exit 1
+    eval "$(A5N_CONFIG="$W/$1/config.ini" python3 "$REPO/scripts/config.py" --sh)"
+    VAULT="$PWD" LOGDIR="$PWD/.a5n-logs" LOG="$PWD/.a5n-logs/lock-test.log" LOCK="$PWD/.a5n-logs/.lock"
+    log() { print -r -- "$*" >> "$LOG"; }
+    notify_fail() { log "FAILED: $1"; }
+    source "$REPO/scripts/lib/sync.sh"
+    # Distinct per machine: both subshells share this script's pid, and two
+    # identical lock commits would make the race meaningless.
+    SYNC_JOB="race-$1"
+    if sync_lock_take; then print -r -- taken; else print -r -- busy; fi
+  )
+}
+
+t_lock_race() {
+  world race
+  machine_config m1 on yes alpha
+  machine_config m2 on yes beta
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  machine_clone m2
+  local round wins
+  for round in {1..20}; do
+    lock_try m1 > "$W/r1" 2>&1 &
+    lock_try m2 > "$W/r2" 2>&1 &
+    wait
+    wins="$(cat "$W/r1" "$W/r2" | grep -cx taken)"
+    if [ "$wins" -ne 1 ]; then
+      bad "round $round had $wins winners"
+      return
+    fi
+    git --git-dir="$W/origin.git" update-ref -d refs/a5n/lock
+  done
+  ok "twenty simultaneous rounds, exactly one winner each"
+}
+
+t_lock_busy() {
+  world busy
+  machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  check_eq "a finished run leaves no lock" "" "$(remote_lock)"
+  fake_lock "host=elsewhere pid=1 job=ingest" now
+  session m1 alpha "$A1" 2026-09-01
+  session m1 alpha "$S1" 2026-09-03 small
+  A5N_SYNC_WAIT=2 a5n m1 daily-ingest.sh
+  has "the skip line went out without the lock" "$(remote_file alpha/log.md)" "skip | $S1"
+  check "the raw file went up without the lock" test -f "$W/drive/alpha/raw/sessions/$A1.jsonl"
+  has "the holder is logged" "$(vlog m1)" "host=elsewhere"
+  has "layer 2 was skipped" "$(vlog m1)" "remote lock stayed busy"
+  check_eq "no unit ran" 0 "$(pages_for "$W/m1/vault" "$A1")"
+  check_eq "the other machine's lock is untouched" "$FAKE_LOCK" "$(remote_lock)"
+}
+
+t_lock_wait_requeue() {
+  world requeue
+  machine_config m1 on yes alpha
+  machine_config m2 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  machine_clone m2
+  a5n m2 daily-ingest.sh
+  fake_lock "host=elsewhere pid=1 job=ingest" now
+  session m1 alpha "$A1" 2026-09-01
+  session m1 alpha "$A2" 2026-09-02
+  A5N_SYNC_WAIT=30 a5n m1 daily-ingest.sh &
+  local drv=$! v2="$W/m2/vault"
+  wait_for "m1 waits for the lock" "vlog m1 | grep -q 'waiting for the remote lock'" || return
+  # Meanwhile the holder processes A1 from the uploaded raw file and leaves.
+  git -C "$v2" pull -q --rebase origin main
+  (cd "$v2" && "$REPO/tests/fake-runner.sh" -p "A5N-TEST-UNIT
+project=alpha
+session=$A1
+raw=alpha/raw/sessions/$A1.jsonl
+date=2026-09-01")
+  git -C "$v2" add -A
+  git -C "$v2" commit -qm "chore: ingest(alpha) on the other machine"
+  git -C "$v2" push -q origin HEAD:main
+  git --git-dir="$W/origin.git" update-ref -d refs/a5n/lock
+  wait "$drv"
+  has "m1 took the lock after waiting" "$(vlog m1)" "remote lock taken"
+  has_not "m1 did not start A1" "$(vlog m1)" "unit started: alpha/$A1"
+  check_eq "A1 has one page" 1 "$(remote_pages_for "$A1")"
+  check_eq "A2 was processed by m1" 1 "$(remote_pages_for "$A2")"
+  check_eq "the lock is released" "" "$(remote_lock)"
+}
+
+t_lock_stale() {
+  world stale
+  machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  session m1 alpha "$A1" 2026-09-01
+  fake_lock "host=elsewhere pid=1 job=ingest" old
+  a5n m1 daily-ingest.sh
+  has "a three hour old lock is taken over" "$(vlog m1)" "took over a stale remote lock"
+  check_eq "the unit ran" 1 "$(pages_for "$W/m1/vault" "$A1")"
+  check_eq "the lock was released" "" "$(remote_lock)"
+
+  session m1 alpha "$A2" 2026-09-02
+  local dead
+  dead="$(zsh -c 'print $$')"
+  fake_lock "host=$(hostname) pid=$dead job=ingest" now
+  a5n m1 daily-ingest.sh
+  has "this host's dead owner is taken over at once" "$(vlog m1)" "pid=$dead"
+  check_eq "the second unit ran" 1 "$(pages_for "$W/m1/vault" "$A2")"
+}
+
+t_lock_lost() {
+  world lost
+  machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  session m1 alpha "$A1" 2026-09-01
+  session m1 alpha "$A2" 2026-09-02
+  # During the first unit another machine takes the lock over.
+  cat > "$W/hook.sh" <<EOF
+[ -e '$W/hooked' ] && exit 0
+: > '$W/hooked'
+tree=\$(git --git-dir='$W/origin.git' mktree < /dev/null)
+c=\$(git --git-dir='$W/origin.git' commit-tree \$tree -m 'a5n lock: host=elsewhere pid=1 job=ingest at=test')
+git --git-dir='$W/origin.git' update-ref refs/a5n/lock \$c
+EOF
+  FAKE_RUNNER_HOOK="$W/hook.sh" a5n m1 daily-ingest.sh
+  has "the lost lock was reported" "$(calls notify)" "taken over by another machine"
+  check_eq "the first unit was pushed" 1 "$(remote_pages_for "$A1")"
+  check_eq "layer 2 stopped before the second" 0 "$(pages_for "$W/m1/vault" "$A2")"
+  has "the new owner's lock was not released" \
+    "$(git --git-dir="$W/origin.git" log -1 --format=%s refs/a5n/lock)" "host=elsewhere"
+}
+
+t_lock_refused() {
+  world refused
+  machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  # A remote that takes branches and refuses every other ref.
+  print -r -- '#!/bin/sh
+case "$1" in refs/heads/*) exit 0 ;; esac
+echo "only branches here" >&2
+exit 1' > "$W/origin.git/hooks/update"
+  chmod +x "$W/origin.git/hooks/update"
+  session m1 alpha "$A1" 2026-09-01
+  session m1 alpha "$S1" 2026-09-03 small
+  forget_calls
+  a5n m1 daily-ingest.sh
+  has "the refusal is reported" "$(calls notify)" "refused to create refs/a5n/lock"
+  check_eq "it is reported once" 1 "$(calls notify | grep -c 'refused to create')"
+  has "the capture still went out" "$(remote_file alpha/log.md)" "skip | $S1"
+  check_eq "no unit ran without the lock" 0 "$(pages_for "$W/m1/vault" "$A1")"
+}
+
 # --- runner ------------------------------------------------------------------
 # Every function named t_<scenario> is a scenario; each builds its own world.
 SCENARIOS=(${(k)functions})

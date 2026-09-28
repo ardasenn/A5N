@@ -298,6 +298,7 @@ sync_begin() {  # <job> <raw download: yes|no> <remote lock: yes|no>
   log "sync: in step with $A5N_SYNC_REMOTE/$A5N_SYNC_BRANCH"
   [ "$(sync_ahead)" -eq 0 ] && sync_ok
   [ "$2" = yes ] && sync_raw down
+  [ "$3" = yes ] && [ "$A5N_SYNC_LOCK" = yes ] && sync_lock_take
   return 0
 }
 
@@ -338,7 +339,38 @@ sync_ready_for_workers() {
       log "sync: blocked by a conflict, layer 2 skipped"
       return 1 ;;
   esac
-  return 0
+  [ "$A5N_SYNC_LOCK" = yes ] || return 0
+  [ -n "$SYNC_HAVE_LOCK" ] && return 0
+  local waited=0
+  while [ -z "$SYNC_LOCK_REFUSED" ] && [ "$waited" -lt "$SYNC_WAIT" ]; do
+    [ "$waited" -eq 0 ] && log "sync: waiting for the remote lock (every ${SYNC_POLL}s, at most ${SYNC_WAIT}s): $SYNC_LOCK_HOLDER"
+    sleep "$SYNC_POLL"
+    waited=$(( waited + SYNC_POLL ))
+    touch "$LOCK"
+    sync_lock_take || continue
+    # The other machine may have processed units while this one waited.
+    if ! sync_fetch; then
+      SYNC_STATE=offline
+      SYNC_SKIP_REASON="$A5N_SYNC_REMOTE unreachable"
+      log "sync: the remote went away after the wait, layer 2 skipped"
+      return 1
+    fi
+    if [ "$SYNC_REMOTE_BRANCH" = 1 ] && ! sync_rebase_onto; then
+      SYNC_STATE=blocked
+      SYNC_SKIP_REASON="local commits conflict with $A5N_SYNC_REMOTE/$A5N_SYNC_BRANCH"
+      notify_fail "local commits conflict with $A5N_SYNC_REMOTE/$A5N_SYNC_BRANCH ($SYNC_CONFLICTS), layer 2 skipped; resolve by hand: git pull --rebase in the vault"
+      return 1
+    fi
+    SYNC_REQUEUE=1
+    return 0
+  done
+  if [ -n "$SYNC_LOCK_REFUSED" ]; then
+    SYNC_SKIP_REASON="$A5N_SYNC_REMOTE refuses the lock ref"
+  else
+    SYNC_SKIP_REASON="the remote lock stayed busy ($SYNC_LOCK_HOLDER)"
+  fi
+  log "sync: layer 2 skipped, $SYNC_SKIP_REASON"
+  return 1
 }
 
 # After a unit's commit. 0 go on; 1 stop layer 2 (the commit stays local and
@@ -370,4 +402,122 @@ sync_push_unit() {  # <commit the unit started from>
       log "WARNING: sync: push refused twice, the commit stays local, layer 2 stops"
       return 1 ;;
   esac
+}
+
+# --- the remote lock -------------------------------------------------------------
+# refs/a5n/lock on the sync remote. It points at a commit with an empty tree
+# and no parent whose message names the owner; its age is the commit's
+# committer time. The server compares the lease and writes in one step, so
+# of two machines racing for it exactly one wins.
+
+sync_lock_commit() {  # prints a fresh lock commit for this run
+  local tree
+  tree="$(git mktree < /dev/null)" || return 1
+  git commit-tree "$tree" -m "a5n lock: host=${HOST:-$(hostname)} pid=$$ job=$SYNC_JOB at=$(date '+%FT%T%z')"
+}
+
+sync_lock_push() {  # <expected commit, empty: must not exist> <new commit, empty: delete>
+  sync_git push --force-with-lease="${SYNC_LOCK_REF}:${1}" "$A5N_SYNC_REMOTE" "${2}:${SYNC_LOCK_REF}" >> "$LOG" 2>&1
+}
+
+sync_lock_remote() {  # prints the lock's commit, empty when free; 1 unreachable
+  local out
+  out="$(sync_git ls-remote "$A5N_SYNC_REMOTE" "$SYNC_LOCK_REF" 2>> "$LOG")" || return 1
+  print -r -- "${out%%[[:space:]]*}"
+}
+
+# One try. 0 taken (SYNC_LOCK_OID is ours); 1 not (SYNC_LOCK_HOLDER says who
+# has it).
+sync_lock_take() {
+  [ -n "$SYNC_LOCK_REFUSED" ] && return 1
+  local new cur info ct subject host="" pid="" age tries=0
+  new="$(sync_lock_commit)" || { log "sync: could not build a lock commit"; return 1; }
+  while :; do
+    if sync_lock_push "" "$new"; then
+      SYNC_HAVE_LOCK=1
+      SYNC_LOCK_OID="$new"
+      log "sync: remote lock taken"
+      return 0
+    fi
+    cur="$(sync_lock_remote)" || { log "sync: remote unreachable while taking the lock"; return 1; }
+    if [ -z "$cur" ]; then
+      # Refused while nothing holds it: once can be a lock released in
+      # between, twice is a remote that does not take custom refs.
+      tries=$(( tries + 1 ))
+      if [ "$tries" -lt 2 ]; then
+        sleep 1
+        continue
+      fi
+      SYNC_LOCK_REFUSED=1
+      notify_fail "$A5N_SYNC_REMOTE refused to create $SYNC_LOCK_REF although no lock exists; the remote must accept custom refs for layer 2 to run"
+      return 1
+    fi
+    sync_git fetch --no-tags "$A5N_SYNC_REMOTE" "+${SYNC_LOCK_REF}:${SYNC_SEEN_REF}" >> "$LOG" 2>&1 || return 1
+    cur="$(git rev-parse "$SYNC_SEEN_REF")"
+    info="$(git log -1 --format='%ct %s' "$SYNC_SEEN_REF")"
+    ct="${info%% *}"
+    subject="${info#* }"
+    [[ "$subject" == *host=* ]] && host="${${subject#*host=}%% *}"
+    [[ "$subject" == *pid=* ]] && pid="${${subject#*pid=}%% *}"
+    [[ "$pid" == <-> ]] || pid=""
+    [[ "$ct" == <-> ]] || ct="$(date +%s)"
+    age=$(( $(date +%s) - ct ))
+    SYNC_LOCK_HOLDER="$subject, ${age}s old"
+    # Stale: older than the local lock's two hours, or this host's own lock
+    # whose pid is gone (the local lock's dead owner rule, so a crash here
+    # does not make this machine's next run wait two hours).
+    if [ "$age" -gt "$SYNC_STALE" ] || \
+       { [ "$host" = "${HOST:-$(hostname)}" ] && [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; }; then
+      if sync_lock_push "$cur" "$new"; then
+        SYNC_HAVE_LOCK=1
+        SYNC_LOCK_OID="$new"
+        log "WARNING: sync: took over a stale remote lock ($SYNC_LOCK_HOLDER)"
+        return 0
+      fi
+      return 1
+    fi
+    log "sync: remote lock held ($SYNC_LOCK_HOLDER)"
+    return 1
+  done
+}
+
+# After every unit, the remote twin of touching the local lock: without it a
+# normal run longer than two hours would look stale to the other machine.
+# 0 go on; 1 the lock is gone (or the remote is), stop layer 2.
+sync_lock_refresh() {
+  sync_on || return 0
+  [ -n "$SYNC_LOCK_OID" ] || return 0
+  local new cur
+  new="$(sync_lock_commit)" || return 0
+  if sync_lock_push "$SYNC_LOCK_OID" "$new"; then
+    SYNC_LOCK_OID="$new"
+    return 0
+  fi
+  if ! cur="$(sync_lock_remote)"; then
+    SYNC_STATE=offline
+    log "WARNING: sync: remote unreachable while refreshing the lock, layer 2 stops"
+    return 1
+  fi
+  if [ "$cur" = "$SYNC_LOCK_OID" ]; then
+    log "WARNING: sync: lock refresh refused but the lock is still ours, going on"
+    return 0
+  fi
+  SYNC_HAVE_LOCK=""
+  SYNC_LOCK_OID=""
+  notify_fail "the remote lock was taken over by another machine mid run, layer 2 stopped"
+  return 1
+}
+
+# EXIT trap. The lease is our own commit, so a run that lost its lock can
+# never delete the new owner's.
+sync_lock_release() {
+  sync_on || return 0
+  [ -n "$SYNC_LOCK_OID" ] || return 0
+  if sync_lock_push "$SYNC_LOCK_OID" ""; then
+    log "sync: remote lock released"
+  else
+    log "WARNING: sync: could not release the remote lock; it goes stale in two hours, at once for this machine's next run"
+  fi
+  SYNC_HAVE_LOCK=""
+  SYNC_LOCK_OID=""
 }

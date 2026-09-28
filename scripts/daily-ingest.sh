@@ -159,6 +159,7 @@ fi
 # If the script dies early the watchdog subshell must not outlive it, or it
 # would later try to kill a pid that no longer belongs to us.
 cleanup() {
+  sync_lock_release
   rm -f "$LOCK"
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
   return 0
@@ -358,6 +359,9 @@ leave no out of schema path. Every other rule still applies."
   fi
   [ "$PUSH_RC" -eq 1 ] && break
   touch "$LOCK"
+  # The remote lock's twin of the touch above. A lock lost to another
+  # machine stops layer 2.
+  sync_lock_refresh || break
 done < "$QTSV"
 
 log "run finished: $OK done, $FAIL failed"
