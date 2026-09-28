@@ -165,6 +165,14 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
+# A stop from the service manager (systemctl stop, launchctl bootout, a
+# shutdown) arrives as TERM, and zsh skips the EXIT trap when a signal it
+# does not trap ends it: the remote lock stayed on the remote and the
+# other machine treated it as busy for two hours. Exiting from a trap
+# runs cleanup. INT and HUP are the same stop for a run started by hand.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1

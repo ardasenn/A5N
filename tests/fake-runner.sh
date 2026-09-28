@@ -9,8 +9,9 @@
 # Switches, all environment:
 #   FAKE_RUNNER_HOOK     a script run before writing: how a test makes "the
 #                        other machine" act while a unit is in flight
-#   FAKE_RUNNER_SLEEP    write half a page, then sleep this many seconds, so
-#                        a test can kill the driver mid unit
+#   FAKE_RUNNER_SLEEP    write half a page (a lint worker writes nothing),
+#                        then sleep this many seconds, so a test can kill
+#                        the driver mid unit
 #   FAKE_RUNNER_PIDFILE  where to write this process's pid before sleeping
 #   FAKE_RUNNER_SHARED   text for line 3 of the root index.md: the shape of
 #                        an edit two machines can both make
@@ -31,6 +32,10 @@ done
 [ -n "${FAKE_RUNNER_HOOK:-}" ] && zsh "$FAKE_RUNNER_HOOK"
 
 if [ "$kind" = A5N-TEST-LINT ]; then
+  if [ -n "${FAKE_RUNNER_SLEEP:-}" ]; then
+    [ -n "${FAKE_RUNNER_PIDFILE:-}" ] && print -r -- $$ > "$FAKE_RUNNER_PIDFILE"
+    sleep "$FAKE_RUNNER_SLEEP"
+  fi
   counter=".a5n-logs/fake-lint-count"
   n=$(( $(cat "$counter" 2>/dev/null || print 0) + 1 ))
   print -r -- "$n" > "$counter"

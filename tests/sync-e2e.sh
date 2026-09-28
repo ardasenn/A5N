@@ -961,6 +961,34 @@ t_start_conflict() {
   check "the failure clock started" test -s "$v1/.a5n-logs/.sync-failing-since"
 }
 
+t_stopped_run() {
+  world stopped
+  machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" script drv
+  # systemctl stop, launchctl bootout and a shutdown send TERM to the whole
+  # group, driver and worker alike, and zsh skips its EXIT trap when an
+  # untrapped signal ends it.
+  for script in daily-ingest.sh weekly-lint.sh; do
+    rm -f "$W/runner.pid"
+    A5N_CONFIG="$W/m1/config.ini" FAKE_RUNNER_SLEEP=30 FAKE_RUNNER_PIDFILE="$W/runner.pid" \
+      setsid zsh "$REPO/scripts/$script" &
+    drv=$!
+    wait_for "the $script worker started" "[ -s '$W/runner.pid' ]" || return
+    check "$script holds the remote lock mid unit" test -n "$(remote_lock)"
+    kill -TERM -- "-$drv" 2>/dev/null
+    wait "$drv" 2>/dev/null
+    check_eq "a stopped $script releases the remote lock" "" "$(remote_lock)"
+    check "a stopped $script removes its local lock" test ! -e "$v/.a5n-logs/.lock"
+    check "the unit flag stays for the next run" test -e "$v/.a5n-logs/.unit-in-progress"
+    # The next run recovers the interrupted unit (t_interrupted_unit shows
+    # how), which leaves a clean vault for the next round.
+    a5n m1 daily-ingest.sh
+  done
+}
+
 # --- runner ------------------------------------------------------------------
 # Every function named t_<scenario> is a scenario; each builds its own world.
 SCENARIOS=(${(k)functions})

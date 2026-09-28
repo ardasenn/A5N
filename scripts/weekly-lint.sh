@@ -134,6 +134,11 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
+# Stop signals exit through cleanup, so the remote lock is released: the
+# reason is in daily-ingest.sh.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
