@@ -56,6 +56,10 @@ notify_fail() {
 # interrupted unit flag.
 source "$SCRIPT_DIR/lib/common.sh"
 
+# Keeps the vault in step with other machines; every call is a no-op while
+# [sync] is off.
+source "$SCRIPT_DIR/lib/sync.sh"
+
 rollback_unit() {
   git reset --hard --quiet >> "$LOG" 2>&1
   git clean -fd --quiet >> "$LOG" 2>&1
@@ -124,6 +128,7 @@ if [ -e "$LOCK" ]; then
   fi
 fi
 cleanup() {
+  sync_lock_release
   rm -f "$LOCK"
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
   return 0
@@ -138,8 +143,11 @@ if [ ! -s "$PROMPT_FILE" ]; then
   exit 1
 fi
 
-# Before anything writes: a unit a killed run left half written goes to the
-# stash, so the commit below cannot sweep it in as manual edits.
+# Before anything writes: with sync, A5N's own interrupted rebase is undone
+# and a user's unfinished git operation or another branch stops the run;
+# then a unit a killed run left half written goes to the stash, so the
+# commit below cannot sweep it in as manual edits.
+sync_recover || exit 0
 recover_interrupted_unit || exit 1
 
 # Hand written edits should not be mixed into lint commits.
@@ -149,7 +157,24 @@ if [ -n "$(git status --porcelain)" ]; then
   git commit -m "chore: manual vault changes (pre-lint $(date +%F))" >> "$LOG" 2>&1
 fi
 
+# With sync: pull, the raw download, then the remote lock. Every lint step
+# edits or reports on pages, so none of it may run next to the other
+# machine's workers. The lint already notifies when the local lock makes it
+# skip, and these skips follow suit.
+sync_begin lint yes yes
+case "$SYNC_STATE" in
+  offline)
+    notify_fail "lint skipped: $A5N_SYNC_REMOTE unreachable; by hand later: scripts/weekly-lint.sh"
+    exit 0 ;;
+  blocked) exit 0 ;;
+esac
+if ! sync_ready_for_workers; then
+  notify_fail "lint skipped: $SYNC_SKIP_REASON; by hand later: scripts/weekly-lint.sh"
+  exit 0
+fi
+
 # --- 1+2. Mechanical layer (deterministic) ----------------------------------
+UNIT_BASE="$(git rev-parse HEAD)"
 unit_begin "lint mechanical repairs"
 log "fix-links started"
 FIX_OUT="$(python3 "$SCRIPT_DIR/fix-links.py" 2>>"$LOG")"
@@ -177,6 +202,13 @@ if [ -n "$(git status --porcelain)" ]; then
   log "mechanical repairs committed"
 fi
 unit_end
+sync_push_unit "$UNIT_BASE"
+case $? in
+  1)
+    log "lint stopped: the remote cannot take pushes now, the commits wait for the next run"
+    exit 0 ;;
+  2) log "mechanical repairs dropped after a conflict, next week's run redoes them" ;;
+esac
 
 # --- 3. Semantic lint: one worker per project -------------------------------
 # The namespace list is dynamic: every vault root directory holding a
@@ -200,6 +232,7 @@ sys.stdout.write(t)
 PYEOF
 )"
 
+  UNIT_BASE="$(git rev-parse HEAD)"
   unit_begin "lint $PROJ"
   UNIT_DONE=""; VREASON=""
   for ATTEMPT in 1 2; do
@@ -279,6 +312,15 @@ report file must have been written."
   done
   unit_end
 
+  # Same rules as the ingest: a conflict drops the report (next week redoes
+  # it), an unreachable remote keeps it and stops.
+  PUSH_RC=0
+  if [ -n "$UNIT_DONE" ]; then
+    sync_push_unit "$UNIT_BASE"
+    PUSH_RC=$?
+    [ "$PUSH_RC" -eq 2 ] && UNIT_DONE=""
+  fi
+
   if [ -n "$UNIT_DONE" ]; then
     OK=$((OK+1))
   else
@@ -288,7 +330,9 @@ report file must have been written."
       break
     fi
   fi
+  [ "$PUSH_RC" -eq 1 ] && break
   touch "$LOCK"
+  sync_lock_refresh || break
 done
 
 log "lint finished: $OK done, $FAIL failed"

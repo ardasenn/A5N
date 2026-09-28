@@ -809,6 +809,51 @@ exit 1' > "$W/origin.git/hooks/update"
   check_eq "no unit ran without the lock" 0 "$(pages_for "$W/m1/vault" "$A1")"
 }
 
+t_lint_sync() {
+  world lint
+  machine_config m1 on yes alpha beta
+  machine_new m1
+  session m1 alpha "$A1" 2026-09-01
+  a5n m1 daily-ingest.sh
+  a5n m1 weekly-lint.sh
+  check "alpha's report reached the remote" test -n "$(remote_file alpha/lint-report.md)"
+  check "beta's report reached the remote" test -n "$(remote_file beta/lint-report.md)"
+  has "lint took the lock" "$(vlog m1 lint)" "remote lock taken"
+  check_eq "and released it" "" "$(remote_lock)"
+  check_eq "everything is pushed" "$(remote_head)" "$(local_head m1)"
+
+  fake_lock "host=elsewhere pid=1 job=ingest" now
+  forget_calls
+  A5N_SYNC_WAIT=2 a5n m1 weekly-lint.sh
+  has "a busy lock skips the lint loudly" "$(calls notify)" "lint skipped: the remote lock stayed busy"
+  git --git-dir="$W/origin.git" update-ref -d refs/a5n/lock
+
+  mv "$W/origin.git" "$W/origin.away"
+  forget_calls
+  a5n m1 weekly-lint.sh
+  has "offline skips the lint loudly" "$(calls notify)" "lint skipped: origin unreachable"
+  mv "$W/origin.away" "$W/origin.git"
+}
+
+t_digest_sync() {
+  world digest
+  machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  forget_calls
+  a5n m1 digest.sh > /dev/null
+  local month
+  month="$(date -d "$(date +%Y-%m-01) -1 month" +%Y-%m)"
+  check "the digest reached the remote" test -n "$(remote_file "digests/$month.md")"
+  has_not "the digest never touches the lock" "$(calls git-net)" "refs/a5n/lock"
+
+  mv "$W/origin.git" "$W/origin.away"
+  forget_calls
+  a5n m1 digest.sh > /dev/null
+  has "offline skips the digest loudly" "$(calls notify)" "digest skipped: origin unreachable"
+  mv "$W/origin.away" "$W/origin.git"
+}
+
 # --- runner ------------------------------------------------------------------
 # Every function named t_<scenario> is a scenario; each builds its own world.
 SCENARIOS=(${(k)functions})
