@@ -888,6 +888,15 @@ t_sync_off_identical() {
     "$(cat "$TOP/identical-new/calls/git-net.log" "$TOP/identical-new/calls/rclone.log" 2>/dev/null)"
 }
 
+t_lint_prompt() {
+  local p
+  # Read as prose: the prompt is wrapped, and a sentence may cross a line.
+  p="$(tr -s '\n ' ' ' < "$REPO/scripts/prompts/weekly-lint.md")"
+  has "the field comes from the vault's CLAUDE.md" "$p" \
+    "Read the vault's CLAUDE.md for that field's name and its closed list"
+  has_not "state: is no longer the only accepted field" "$p" "out of list \`state:\` value"
+}
+
 # --- runner ------------------------------------------------------------------
 # Every function named t_<scenario> is a scenario; each builds its own world.
 SCENARIOS=(${(k)functions})

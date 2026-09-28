@@ -32,9 +32,13 @@ one.
    the number of pages it appears in).
 4. **Frontmatter, closed enum audit.** Pages with no frontmatter, a
    `status:` outside its list (active|stale|archived), or a missing
-   `source:` field; in bugs/, a missing or out of list `state:` value
-   (index.md and log.md excluded; the Grep tool is enough). The lists are
-   closed, so a plausible looking new value is still a finding.
+   `source:` field; in bugs/, a missing or out of list value in the bug
+   state field. Read the vault's CLAUDE.md for that field's name and its
+   closed list: the default schema calls it `state:` with
+   open|pending|fixed|closed, but a vault may define its own, and the
+   vault's definition wins. (index.md and log.md excluded; the Grep tool is
+   enough.) The lists are closed, so a plausible looking new value is still
+   a finding.
 5. **Wrong link targets.** Pages where a `[[...]]` or `[text](path)` points
    at a repository code path or a symbol name rather than a vault page.
    Those should have been plain backticked text. Count them separately from
