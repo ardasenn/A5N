@@ -430,6 +430,232 @@ t_interrupted_unit() {
   has "the user was told where to look" "$(calls notify)" "git stash list"
 }
 
+t_two_machines() {
+  world two
+  machine_config m1 on no alpha gamma
+  machine_config m2 on no beta gamma
+  machine_new m1
+  session m1 alpha "$A1" 2026-09-01
+  session m1 gamma "$G1" 2026-09-02
+  session m1 alpha "$S1" 2026-09-03 small
+  a5n m1 daily-ingest.sh
+  check_eq "m1 pushed its first page" 1 "$(remote_pages_for "$A1")"
+  has "m1's skip line reached the remote" "$(remote_file alpha/log.md)" "skip | $S1"
+  check "m1's raw file is in storage" test -f "$W/drive/alpha/raw/sessions/$A1.jsonl"
+
+  machine_clone m2
+  session m2 beta "$B1" 2026-09-04
+  session m2 gamma "$G2" 2026-09-05
+  a5n m2 daily-ingest.sh
+  local v1="$W/m1/vault" v2="$W/m2/vault" sid
+  check "m2 downloaded m1's alpha raw file" test -f "$v2/alpha/raw/sessions/$A1.jsonl"
+  check "m2 downloaded m1's gamma raw file" test -f "$v2/gamma/raw/sessions/$G1.jsonl"
+  check_eq "m2 did not redo m1's gamma session" 1 "$(pages_for "$v2" "$G1")"
+  check_eq "m2 processed its beta session" 1 "$(pages_for "$v2" "$B1")"
+  check_eq "m2 processed its gamma session" 1 "$(pages_for "$v2" "$G2")"
+
+  a5n m1 daily-ingest.sh
+  check "m1 got m2's raw file" test -f "$v1/beta/raw/sessions/$B1.jsonl"
+  check_eq "m1 got m2's page" 1 "$(pages_for "$v1" "$B1")"
+  for sid in "$A1" "$G1" "$B1" "$G2"; do
+    check_eq "one page for ${sid:0:8} on the remote" 1 "$(remote_pages_for "$sid")"
+    check "raw ${sid:0:8} is in storage" test -n "$(find "$W/drive" -name "$sid.jsonl")"
+  done
+  check_eq "m1 is where the remote is" "$(remote_head)" "$(local_head m1)"
+  check_eq "no conflict markers" "" "$(grep -rl '^<<<<<<<' "$v1" "$v2" --include='*.md' 2>/dev/null)"
+  check_eq "no notification" "" "$(calls notify)"
+}
+
+t_offline() {
+  world offline
+  machine_config m1 on no alpha
+  machine_new m1
+  session m1 alpha "$A1" 2026-09-01
+  a5n m1 daily-ingest.sh
+  session m1 alpha "$A2" 2026-09-02
+  session m1 alpha "$S1" 2026-09-03 small
+  mv "$W/origin.git" "$W/origin.away"
+  forget_calls
+  a5n m1 daily-ingest.sh
+  local v="$W/m1/vault"
+  has "the run said it is offline" "$(vlog m1)" "unreachable, working offline"
+  check "the raw file was captured" test -f "$v/alpha/raw/sessions/$A2.jsonl"
+  has "the capture commit exists locally" "$(git -C "$v" log -1 --format=%s)" "chore: raw capture"
+  check_eq "no unit ran offline" 0 "$(pages_for "$v" "$A2")"
+  check_eq "rclone was never called offline" "" "$(calls rclone)"
+  check "the failure clock started" test -s "$v/.a5n-logs/.sync-failing-since"
+  check_eq "one failed run is quiet" "" "$(calls notify)"
+
+  print -r -- "$(( $(date +%s) - 90000 ))" > "$v/.a5n-logs/.sync-failing-since"
+  a5n m1 daily-ingest.sh
+  has "a day of failing sync notifies" "$(calls notify)" "sync has been failing"
+
+  mv "$W/origin.away" "$W/origin.git"
+  a5n m1 daily-ingest.sh
+  check_eq "back online the queue ran" 1 "$(pages_for "$v" "$A2")"
+  check_eq "and everything is pushed" "$(remote_head)" "$(local_head m1)"
+  check "the failure clock was reset" test ! -e "$v/.a5n-logs/.sync-failing-since"
+  check "the offline raw file reached storage" test -f "$W/drive/alpha/raw/sessions/$A2.jsonl"
+}
+
+t_log_union() {
+  world union
+  machine_config m1 on no gamma
+  machine_config m2 on no gamma
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  machine_clone m2
+  a5n m2 daily-ingest.sh
+  # m1 pushes a skip line; m2 has an unpushed hand edit to the same log.
+  session m1 gamma "$S1" 2026-09-03 small
+  a5n m1 daily-ingest.sh
+  printf '\n## [2026-09-04] note | typed by hand on m2\n' >> "$W/m2/vault/gamma/log.md"
+  a5n m2 daily-ingest.sh
+  local log2
+  log2="$(cat "$W/m2/vault/gamma/log.md")"
+  has "m1's line is on m2" "$log2" "skip | $S1"
+  has "m2's line is still there" "$log2" "typed by hand on m2"
+  has_not "no conflict markers" "$log2" "<<<<<<<"
+  check_eq "m2 pushed the merge" "$(remote_head)" "$(local_head m2)"
+
+  # A refused unit push: m1 appends to the same log while m2's unit runs.
+  session m2 gamma "$G2" 2026-09-05
+  cat > "$W/hook.sh" <<EOF
+cd '$W/m1/vault'
+git pull -q --rebase origin main
+printf '\n## [2026-09-05] note | from m1 mid unit\n' >> gamma/log.md
+git commit -qam 'chore: m1 note'
+git push -q origin HEAD:main
+EOF
+  FAKE_RUNNER_HOOK="$W/hook.sh" a5n m2 daily-ingest.sh
+  log2="$(remote_file gamma/log.md)"
+  has "the unit's line reached the remote" "$log2" "ingest | ${G2:0:8}"
+  has "m1's mid unit line survived" "$log2" "from m1 mid unit"
+  check_eq "the unit was not dropped" 1 "$(remote_pages_for "$G2")"
+}
+
+t_unit_push_conflict() {
+  world conflict
+  machine_config m1 on no alpha
+  machine_config m2 on no beta
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  machine_clone m2
+  a5n m2 daily-ingest.sh
+  session m2 beta "$B1" 2026-09-04
+  # While m2's unit runs, m1 pushes its own line 3 of the root index.md.
+  cat > "$W/hook.sh" <<EOF
+cd '$W/m1/vault'
+git pull -q --rebase origin main
+sed -i '3s/.*/edited on m1/' index.md
+git commit -qam 'chore: m1 edits the index'
+git push -q origin HEAD:main
+EOF
+  FAKE_RUNNER_HOOK="$W/hook.sh" FAKE_RUNNER_SHARED="edited by a unit on m2" a5n m2 daily-ingest.sh
+  local v2="$W/m2/vault"
+  has "the drop was logged" "$(vlog m2)" "unit commit dropped after a rebase conflict"
+  check_eq "the unit left no page" 0 "$(pages_for "$v2" "$B1")"
+  check_eq "m2 follows the remote again" "$(remote_head)" "$(local_head m2)"
+  check_eq "m1's edit is on m2" "edited on m1" "$(sed -n 3p "$v2/index.md")"
+  a5n m2 daily-ingest.sh
+  check_eq "the next run processed the unit" 1 "$(pages_for "$v2" "$B1")"
+}
+
+t_foreign_state() {
+  world foreign
+  machine_config m1 on no alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  local v="$W/m1/vault"
+  session m1 alpha "$A1" 2026-09-01
+
+  git -C "$v" checkout -q -b elsewhere
+  a5n m1 daily-ingest.sh
+  has "another branch is reported" "$(calls notify)" "the vault is on 'elsewhere', sync expects 'main'"
+  check "nothing was captured on it" test ! -e "$v/alpha/raw/sessions/$A1.jsonl"
+  git -C "$v" checkout -q main
+
+  # A rebase the user started and left in a conflict.
+  git -C "$v" checkout -q -b side
+  sed -i '3s/.*/side edit/' "$v/index.md"
+  git -C "$v" commit -qam "side"
+  git -C "$v" checkout -q main
+  sed -i '3s/.*/main edit/' "$v/index.md"
+  git -C "$v" commit -qam "main"
+  git -C "$v" rebase side > /dev/null 2>&1
+  forget_calls
+  a5n m1 daily-ingest.sh
+  has "the user's rebase is reported" "$(calls notify)" "has a rebase in progress, run skipped"
+  check "the user's rebase is untouched" test -d "$v/.git/rebase-merge"
+  git -C "$v" rebase --abort
+
+  # The same state with A5N's marker: its own interrupted rebase.
+  git -C "$v" rebase side > /dev/null 2>&1
+  : > "$v/.a5n-logs/.sync-rebase"
+  a5n m1 daily-ingest.sh
+  has "A5N aborted its own rebase" "$(vlog m1)" "aborted a rebase an interrupted run left behind"
+  check "no rebase is left" test ! -d "$v/.git/rebase-merge"
+  check_eq "the run went on" 1 "$(pages_for "$v" "$A1")"
+}
+
+t_raw_failure() {
+  world rawfail
+  machine_config m1 on no alpha
+  machine_new m1
+  session m1 alpha "$A1" 2026-09-01
+  chmod 0555 "$W/drive"
+  a5n m1 daily-ingest.sh
+  chmod 0755 "$W/drive"
+  has "the failed upload notified" "$(calls notify)" "raw file copy (upload) failed for: alpha"
+  check_eq "the run went on" 1 "$(pages_for "$W/m1/vault" "$A1")"
+  check_eq "and pushed" "$(remote_head)" "$(local_head m1)"
+  a5n m1 daily-ingest.sh
+  check "the next run uploaded the raw file" test -f "$W/drive/alpha/raw/sessions/$A1.jsonl"
+}
+
+t_raw_in_git() {
+  world rawgit
+  CFG_RAW_REMOTE="" machine_config m1 on no alpha
+  CFG_RAW_REMOTE="" machine_config m2 on no alpha
+  # raw/ stays in git: the template .gitignore does not exclude it.
+  mkdir -p "$W/m1/vault"
+  git -C "$W/m1/vault" init -q -b main
+  git -C "$W/m1/vault" remote add origin "$W/origin.git"
+  a5n m1 setup.sh > /dev/null 2>&1
+  session m1 alpha "$A1" 2026-09-01
+  a5n m1 daily-ingest.sh
+  machine_clone m2
+  a5n m2 daily-ingest.sh
+  check "the raw file came through git" test -f "$W/m2/vault/alpha/raw/sessions/$A1.jsonl"
+  check_eq "rclone was never called" "" "$(calls rclone)"
+  check_eq "m2 did not redo the unit" 1 "$(pages_for "$W/m2/vault" "$A1")"
+}
+
+t_bounded() {
+  world bounded
+  local start=$SECONDS rc
+  (
+    LOGDIR="$W" LOG="$W/log" LOCK="$W/lock" VAULT="$W"
+    log() { :; }
+    notify_fail() { :; }
+    source "$REPO/scripts/lib/sync.sh"
+    sync_bounded 1 sleep 30
+  )
+  rc=$?
+  check "a hung command is cut" test "$rc" -ne 0
+  check "within its bound" test $(( SECONDS - start )) -lt 10
+  # A command that finishes keeps its exit status: sync_fetch reads
+  # ls-remote's 2 ("no such branch") through this wrapper.
+  (
+    LOGDIR="$W" LOG="$W/log" LOCK="$W/lock" VAULT="$W"
+    log() { :; }
+    notify_fail() { :; }
+    source "$REPO/scripts/lib/sync.sh"
+    sync_bounded 5 sh -c 'exit 7'
+  )
+  check_eq "a finished command keeps its exit status" 7 "$?"
+}
+
 # --- runner ------------------------------------------------------------------
 # Every function named t_<scenario> is a scenario; each builds its own world.
 SCENARIOS=(${(k)functions})
