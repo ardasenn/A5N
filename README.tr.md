@@ -186,12 +186,17 @@ kendi saatinde kapalı olduğu için zamanlayıcının açılışta başlattığ
 koşudur: ağ henüz gelmemiş olabilir, Linux'ta da linger kullanıcı
 timer'larını giriş olmadan çalıştırdığı için henüz kimse giriş yapmamış
 olabilir; o zaman masaüstü keyring'inde duran git kimliği (`gh` token'ını
-orada tutar) hâlâ kilitlidir. Kimse giriş yapmamışken koşu remote'a hiç
-gitmez: girişi bekler, giriş olur olmaz dener. Süre dolduğunda remote'a
-hâlâ ulaşılamıyorsa koşu yine yakalar ve yerelde commit'ler, işçileri
-atlar, bir sonraki seferde push eder; lint ve digest bildirimle atlanır.
-`offline_after = 0` üç hızlı denemeden sonra vazgeçer. Senkron bir günden
-uzun süre başarısız olmaya devam ederse bildirim gelir.
+orada tutar) hâlâ kilitlidir. Üç hızlı denemeden sonra, kimse giriş
+yapmamışken koşu remote'a dokunmaz ve girişi bekler; girişten sonraki 20
+saniye içinde yeniden dener, süre dolunca da bir kez daha. Devam etmeden
+önce vault'a yeniden bakar: bu sırada yaptığın düzenlemeler kendi
+commit'ini alır, başlattığın bir rebase ya da geçtiğin başka bir branch
+koşuyu hiçbir şeye dokunmadan durdurur. Süre dolduğunda remote'a hâlâ
+ulaşılamıyorsa koşu yine yakalar ve yerelde commit'ler, işçileri atlar, bir
+sonraki seferde push eder; lint ve digest bildirimle atlanır. Elle
+başlattığın bir koşu da aynı şekilde bekler, Ctrl-C onu temiz biçimde
+durdurur. `offline_after = 0` üç hızlı denemeden sonra vazgeçer. Senkron
+bir günden uzun süre başarısız olmaya devam ederse bildirim gelir.
 
 İkinci makinede `[schedule]` içinde `lint = off` ve `digest = off` yap: lint
 raporları ve digest'ler baştan yazılır, dolayısıyla tek bir makinenin işi

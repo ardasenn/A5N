@@ -176,6 +176,19 @@ above. Not reached: the run is offline exactly as before. The local lock is
 held throughout, as during the wait for the remote lock. `offline_after = 0`
 skips the wait.
 
+Either way the run then asks sync_recover's questions about the vault
+again, because the wait can end just as somebody logs in and starts
+working. A git operation in progress or another branch stops the run
+untouched, as at the start, and hand edits made meanwhile get a manual
+changes commit of their own (one helper in `lib/common.sh`, shared with the
+drivers' commit before the start). Found in review: without it a hand edit
+made git refuse the rebase, a conflict that was not there, and layer 2 was
+skipped; a rebase started by hand was aborted by A5N's own; another branch
+checked out meanwhile was rebased, processed and pushed to the sync branch.
+The digest traps TERM, INT and HUP like the other drivers now, so a stop
+during its wait removes the local lock and ends with a status the unit
+reads as a stop.
+
 ### Daily ingest
 
 1. Start as above.
@@ -419,9 +432,13 @@ Scenarios:
     being skipped; the last attempt at the end of the wait reaches a remote
     that came back while nobody logged in; a remote that never comes back
     ends the run offline exactly as before, within `offline_after` plus one
-    round; a run stopped during the wait, by TERM to its group or to the
-    driver, ends at once, leaves no process and no local lock, and captures
-    nothing. The older scenarios run with `offline_after = 0`.
+    round; an ingest, a lint or a digest stopped during the wait, by TERM
+    to its group or to the driver, ends at once, leaves no process and no
+    local lock, and captures nothing. After review: a hand edit made during
+    the wait gets its own commit and the run goes on (online and offline);
+    a rebase started by hand during the wait, or another branch checked
+    out, stops the run untouched. The older scenarios run with
+    `offline_after = 0`.
 
 Plus the standard checks: `py_compile`, `zsh -n` on every shell file,
 `config.py --check` on the test configs, and config validation cases.
@@ -466,6 +483,11 @@ this repository, like any other vault data.
   its next slot. The lock is checked and written in two steps, so two runs
   starting in the same instant can both pass. A run waiting for the remote
   holds the lock like any other run. A fix is planned as a separate change.
+* After the wait for the remote lock, up to an hour, the run fetches and
+  rebases without asking sync_recover's questions again. A hand edit made
+  during that hour makes git refuse the rebase and the run is reported as
+  blocked. The check the wait for the remote got fits here too; planned
+  with the local lock change.
 * Two machines scheduled at the same minute make one of them wait. Runs of
   34 to 83 minutes were observed on a real vault, so the waiting machine can
   miss its layer 2 for the day. Stagger the schedules.

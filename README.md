@@ -182,13 +182,17 @@ cause is a run the scheduler starts at boot because the machine was off at
 its time: the network may not be up yet, and on Linux, where lingering lets
 user timers run without a login, nobody may have logged in yet, so a git
 credential kept in the desktop keyring (where `gh` keeps its token) is
-still locked. While nobody is logged in, the run does not contact the
-remote at all: it waits for a login and tries right after it. If the remote
-is still out of reach when the time is up, the run captures and commits
-locally, skips the workers, and pushes next time; lint and digest are
-skipped with a notification. `offline_after = 0` gives up after three quick
-attempts. If sync keeps failing for more than a day, you get a
-notification.
+still locked. After three quick attempts, while nobody is logged in, the
+run leaves the remote alone and watches for a login; it tries again within
+20 seconds of the login, and once more when the time is up. Before it goes
+on, it looks at the vault again: edits you made meanwhile get a commit of
+their own, and a rebase you started or another branch you checked out
+stops the run without touching anything. If the remote is still out of
+reach when the time is up, the run captures and commits locally, skips the
+workers, and pushes next time; lint and digest are skipped with a
+notification. A run you start by hand waits the same way, and Ctrl-C stops
+it cleanly. `offline_after = 0` gives up after the three quick attempts. If
+sync keeps failing for more than a day, you get a notification.
 
 On the second machine, set `lint = off` and `digest = off` in `[schedule]`:
 lint reports and digests are rewritten whole, so one machine should own
