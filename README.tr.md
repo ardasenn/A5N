@@ -131,7 +131,9 @@ zsh scripts/weekly-lint.sh     # haftalık koştuğu
 ```
 
 İkisi de istediğin an elle çalıştırılabilir. Kilit aldıkları için elle koşu ile
-zamanlanmış koşu çakışamaz.
+zamanlanmış koşu hiçbir zaman aynı anda çalışmaz: kilidi dolu bulan koşu
+diğerinin bitmesini iki saate kadar bekler ve bunu terminale yazar. Ctrl-C
+beklemeyi durdurur.
 
 ## İki makine, tek vault
 
@@ -170,8 +172,10 @@ Sync açıkken her koşu:
 Kilit remote'ta bir ref'tir, `refs/a5n/lock`, ve sadece henüz yoksa
 oluşturulur; iki makine aynı anda başlarsa işçileri tam olarak biri
 koşturur. Diğeri yine yakalar ve push eder, sonra kilidi bir saate kadar
-bekler. Kilit her oturumdan sonra tazelenir; iki saatten eski bir kilit,
-çöken bir koşudan kalmış sayılır.
+bekler. Kilidi aldığında, herhangi bir işçi başlamadan önce, remote'u
+beklemenin ardından olduğu gibi (aşağıda) vault'a yeniden bakar. Kilit her
+oturumdan sonra tazelenir; iki saatten eski bir kilit, çöken bir koşudan
+kalmış sayılır.
 
 İki tarafta da hiçbir şey silinmez ya da üzerine yazılmaz: ham dosyalar
 `rclone copy --immutable` ile kopyalanır, push'lar asla zorlanmaz. `log.md`
@@ -303,9 +307,16 @@ ve sayfa yazar.
 - Vault bir git repo'sudur ve işçi başlamadan önce ağaç her zaman temizdir,
   dolayısıyla geri alma yalnızca o işçinin çıktısına dokunabilir.
 - Tek kilit dosyasını bütün görevler paylaşır, ingest, lint ve digest,
-  dolayısıyla hiçbiri diğeriyle çakışamaz. İki saatten eski kilit ölü
-  sayılır, çünkü çöken bir süreç temizlik trap'ini çalıştıramaz ve ölü kilit
-  sonraki tüm koşuları sessizce yutar.
+  dolayısıyla hiçbiri diğeriyle çakışamaz. Kilit tek adımda oluşturulur, bu
+  yüzden aynı anda başlayan iki görevden tam olarak biri alır. Kilidi dolu
+  bulan görev atlanmaz, iki saate kadar bekler: zamanlayıcı, makine
+  kapalıyken kaçırılan bütün koşuları açılışta birlikte başlatır ve atlanan
+  bir lint ya da digest bir sonraki zamanını, bir hafta ya da bir ay,
+  beklerdi.
+- Sahibi ölmüş ya da iki saatten eski kilit ölü sayılır, çünkü çöken bir
+  süreç temizlik trap'ini çalıştıramaz ve ölü kilit sonraki tüm koşuları
+  sessizce yutar. Böyle bir kilidi bekleyen görevlerden yalnızca biri
+  devralabilir.
 - Sync açıkken kilidin ikinci bir yarısı olur: git remote'unda, model
   işçileri koşarken aynı anda sadece bir makinenin tutabildiği bir ref. Her
   oturumdan sonra tazelenir, dolayısıyla uzun bir koşu asla terk edilmiş

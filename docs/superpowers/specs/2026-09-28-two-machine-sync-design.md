@@ -3,7 +3,10 @@
 Date: 2026-09-28. Approved by the user in conversation, in two parts, together
 with the four decisions recorded below. Revised on 2026-09-29: a run waits
 for a remote it cannot reach at its start (decision 2, "Waiting for the
-remote").
+remote"). Revised again the same day, in a separate change: a job waits for
+the local lock instead of skipping, the lock is taken in one step, and the
+vault is checked again after the wait for the remote lock ("The local
+lock").
 
 ## Problem
 
@@ -102,7 +105,8 @@ line.
   and `LOCK`; its functions run with the vault as the working directory.
   When sync is off every function returns 0 before running any command.
 * `scripts/lib/common.sh`, new. What the three drivers share that is not
-  sync: the desktop notification and the interrupted unit flag.
+  sync: the desktop notification, the interrupted unit flag and, since
+  2026-09-29, the local lock.
 * `scripts/daily-ingest.sh`, `scripts/weekly-lint.sh`, `scripts/digest.sh`:
   source both libraries and call them at fixed points.
 * `scripts/setup.sh`, `scripts/config.py`, `scripts/prompts/weekly-lint.md`,
@@ -114,7 +118,8 @@ line.
 
 ### Start, all three drivers
 
-1. Local lock, as today.
+1. Local lock, taken in one step and waited for while another job holds it
+   (see "The local lock").
 2. If A5N's own rebase was interrupted (a marker file,
    `.a5n-logs/.sync-rebase`, exists while A5N rebases), abort that rebase.
 3. A rebase, merge, cherry pick or revert in progress without the marker is
@@ -195,6 +200,64 @@ The digest traps TERM, INT and HUP like the other drivers now, so a stop
 during its wait removes the local lock and ends with a status the unit
 reads as a stop.
 
+### The local lock
+
+Added on 2026-09-29, as a change of its own. The three jobs share
+`.a5n-logs/.lock` because they commit into one git tree. A job that found it
+held was skipped, and a timer with `Persistent=true` starts every run the
+machine was off for at once, about four seconds after boot: the job that
+lost was skipped until its next slot, a day for the ingest, a week for the
+lint, a month for the digest, since the timer had already recorded the run.
+On 2026-09-28 a lint catch-up held the lock from 08:57:08 to 09:28:36 after
+a boot at 08:57:04; an ingest timer at 09:07 would have lost its day. The
+wait for the remote at the start made such windows longer still. And the
+lock was taken in two steps, a look and, after the trap setup, a write, so
+two runs starting in the same instant could both pass the look.
+
+1. The three copies of the lock code in the drivers became one set of
+   functions in `lib/common.sh`.
+2. The lock is created in one step: with zsh's `noclobber`, `>` opens the
+   file with `O_EXCL` (checked with strace), so of two runs that create it
+   at once exactly one succeeds.
+3. A lock held by a live run is waited for: a look every 10 seconds, at
+   most two hours. Two hours covers an ingest (34 to 95 minutes observed) or
+   a lint (about 30). The bound is a constant in the code, not a setting:
+   it follows A5N's own run lengths, not the machine, like the one hour wait
+   for the remote lock. The environment overrides `A5N_LOCK_WAIT` and
+   `A5N_LOCK_POLL` exist for the tests. All three jobs wait: one rule, and a
+   lost ingest day delays a whole day's cap of sessions while a backlog is
+   worked off. The service units are `Type=oneshot`, which systemd starts
+   with no time limit, so nothing cuts the wait.
+4. Every look applies the staleness rules again, unchanged: a dead owner
+   pid, or a lock not touched for two hours. An owner that dies during the
+   wait frees the lock at the next look.
+5. Removing a stale lock is a look and then a remove, and two waiters that
+   looked in the same instant both removed it: the second removed the lock
+   the first had just written, and both ran. The look, the remove and the
+   new lock therefore happen under a second lock, `zsystem flock` on
+   `.a5n-logs/.lock-guard`, held by a subshell for milliseconds. The kernel
+   drops it when the process holding it exits, so it cannot go stale. The
+   whole lock did not move to `flock`: the staleness rules read the pid in
+   the file, and a process drops its `fcntl` lock when it closes any
+   descriptor of the file, a trap any later redirection could spring.
+6. The drivers set their traps before the wait, so a stop during it leaves
+   as a stop (143, 130 or 129). The exit trap removes the lock only when this
+   run took it: a run stopped while it waited leaves the other run's lock
+   alone.
+7. When the wait runs out, the job does what it did before: the ingest logs
+   the skip, the lint and the digest notify. A run started by hand on a
+   terminal prints one line to stderr when it starts to wait; Ctrl-C stops
+   it.
+
+The wait for the remote lock (ingest step 6) got the same second look at
+the vault that the wait for the remote got: after the lock is taken and
+before the fetch and rebase, a git operation in progress or another branch
+stops the run untouched, and hand edits get a manual changes commit of
+their own. The tests showed what happened without it: a hand edit made git
+refuse the rebase and was reported as a conflict, a rebase started by hand
+was aborted by A5N's own, and another branch was rebased, processed and
+pushed to the sync branch.
+
 ### Daily ingest
 
 1. Start as above.
@@ -209,7 +272,8 @@ reads as a stop.
 4. Empty queue: the run ends. The lock is never waited for.
 5. Offline or blocked: layer 2 is skipped, logged, exit 0.
 6. No lock yet: wait, polling every 5 minutes for at most 1 hour, touching
-   the local lock at every poll. On success fetch and rebase again (the other
+   the local lock at every poll. On success look at the vault again (added
+   2026-09-29, see "The local lock"), then fetch and rebase again (the other
    machine may have processed units meanwhile) and recompute the queue. On
    timeout log who holds the lock since when, skip layer 2, exit 0.
 7. Per unit: remember `HEAD` as the unit base, write the unit flag, run the
@@ -240,8 +304,10 @@ What a unit does with each result:
 
 Everything the lint does needs the lock. Offline: notify "lint skipped",
 exit 0. Blocked: exit 0. Lock wait timeout: notify "lint skipped", as the
-lint already notifies when the local lock makes it skip. The mechanical
-repair commit and each project report follow the unit rules.
+lint already notifies when the wait for the local lock runs out. A vault
+that changed under the lock wait: exit 0 after the vault check's own
+notification, with no second one. The mechanical repair commit and each
+project report follow the unit rules.
 
 ### Monthly digest
 
@@ -446,6 +512,23 @@ Scenarios:
     a rebase started by hand during the wait, or another branch checked
     out, stops the run untouched. The older scenarios run with
     `offline_after = 0`.
+15. Added with the local lock (2026-09-29), sync off unless noted. The fake
+    runner writes a start and an end line per worker, so a test sees two
+    workers running in one vault at once. An ingest and a lint started in
+    the same instant both run, one after the other, and exactly one of them
+    waited; an ingest that arrives while a lint runs waits and then runs; a
+    holder that never finishes makes each job wait out the bound and then
+    act as before (the ingest logs, lint and digest notify), a run on a
+    terminal (`script` gives it one) says it waits, and the holder's lock
+    stays; a job stopped during the wait, by TERM or INT to its group or
+    TERM to the driver, ends at once and leaves the holder's lock alone; a
+    dead owner and a lock three hours old are still taken over at once;
+    three waiters released in the same instant, thirty rounds against a
+    dead owner, an old lock and no lock, give exactly one winner each round.
+    Without the kernel lock that round count found two winners, without
+    `O_EXCL` three. With sync on: a hand edit, a rebase started by hand or
+    another branch during the wait for the remote lock, for the ingest, and
+    for the lint one notification only.
 
 Plus the standard checks: `py_compile`, `zsh -n` on every shell file,
 `config.py --check` on the test configs, and config validation cases.
@@ -483,18 +566,13 @@ this repository, like any other vault data.
   waits for the next run, lint and digest are skipped), and its
   notification may reach nobody: a desktop without a session may have no
   notification daemon.
-* One local lock is shared by the three jobs, and a job that finds it held
-  is skipped. Two runs a timer starts at the same boot, say an ingest missed
-  at 09:07 and a lint missed on Friday, start in the same second and one of
-  them is skipped: an ingest until the next day, a lint or a digest until
-  its next slot. The lock is checked and written in two steps, so two runs
-  starting in the same instant can both pass. A run waiting for the remote
-  holds the lock like any other run. A fix is planned as a separate change.
-* After the wait for the remote lock, up to an hour, the run fetches and
-  rebases without asking sync_recover's questions again. A hand edit made
-  during that hour makes git refuse the rebase and the run is reported as
-  blocked. The check the wait for the remote got fits here too; planned
-  with the local lock change.
+* A job waits for the local lock at most two hours. Three runs a timer
+  starts at one boot run one after another, and when a long ingest (up to
+  95 minutes observed) and a lint (about 30) come before the third, the
+  third waits past the two hours and is skipped as before: a lint or a
+  digest with a notification, an ingest until the next day. A run waiting
+  for the remote, or for the remote lock, holds the local lock meanwhile,
+  so the jobs behind it wait that long too.
 * Two machines scheduled at the same minute make one of them wait. Runs of
   34 to 83 minutes were observed on a real vault, so the waiting machine can
   miss its layer 2 for the day. Stagger the schedules.

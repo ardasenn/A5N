@@ -128,7 +128,9 @@ zsh scripts/weekly-lint.sh     # what it runs weekly
 ```
 
 Both are safe to run by hand at any time. They take a lock, so a manual run and
-a scheduled one cannot collide.
+a scheduled one never run at the same time: a run that finds the lock taken
+waits for the other one to finish, up to two hours, and says so on the
+terminal. Ctrl-C stops the wait.
 
 ## Two machines, one vault
 
@@ -166,8 +168,10 @@ With sync on, every run:
 The lock is a ref on the remote, `refs/a5n/lock`, created only if it does
 not exist yet, so when both machines start at once exactly one runs
 workers. The other still captures and pushes, then waits up to an hour for
-the lock. The lock is refreshed after every session, and one older than two
-hours is treated as left behind by a crash.
+the lock. When it gets the lock it looks at the vault again, as after a
+wait for the remote (below), before any worker starts. The lock is
+refreshed after every session, and one older than two hours is treated as
+left behind by a crash.
 
 Nothing is ever deleted or overwritten on either side: raw files are copied
 with `rclone copy --immutable`, and pushes are never forced. `log.md` files
@@ -299,9 +303,15 @@ writes pages.
 - The vault is a git repository and the tree is always clean before a worker
   starts, so a rollback can only ever touch that one worker's output.
 - One lock file is shared by every job, ingest, lint and digest, so none can
-  overlap another. A lock older than two hours is treated as dead, because a
-  crash cannot run the cleanup trap and a stale lock would silently swallow
-  every later run.
+  overlap another. It is created in one step, so of two jobs that start in
+  the same instant exactly one gets it. A job that finds it taken waits, up
+  to two hours, instead of skipping: the scheduler starts every run the
+  machine was off for together at boot, and a skipped lint or digest would
+  wait a week or a month for its next slot.
+- A lock whose owner is gone, or older than two hours, is treated as dead,
+  because a crash cannot run the cleanup trap and a stale lock would
+  silently swallow every later run. Only one waiting job can take such a
+  lock over.
 - With sync on, the lock has a second half: a ref on the git remote that
   only one machine at a time can hold while model workers run. It is
   refreshed after every session, so a long run never looks abandoned.
