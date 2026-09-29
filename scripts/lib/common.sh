@@ -116,10 +116,11 @@ lock_read() {
   LOCK_AGE=$(( $(date +%s) - mtime ))
 }
 
-# Whether pid $1 runs one of the three drivers. ps on Linux and on macOS
-# both print the whole command line with -o command=.
+# Whether pid $1 runs one of the three drivers: -o command= is the whole
+# command line on Linux and on macOS. -ww, because procps cuts it to an
+# exported COLUMNS even into a pipe, and a cut line hid a running driver.
 lock_owner_is_a5n() {
-  [[ "$(ps -p "$1" -o command= 2>/dev/null)" == *(daily-ingest|weekly-lint|digest).sh* ]]
+  [[ "$(ps -ww -p "$1" -o command= 2>/dev/null)" == *(daily-ingest|weekly-lint|digest).sh* ]]
 }
 
 # A stale lock would swallow every later run. A dead owner pid frees it at

@@ -45,7 +45,7 @@ SYNC_SEEN_REF="refs/a5n/seen-lock"
 SYNC_WAIT="${A5N_SYNC_WAIT:-3600}"
 SYNC_POLL="${A5N_SYNC_POLL:-300}"
 SYNC_RETRY_DELAY="${A5N_SYNC_RETRY_DELAY:-20}"
-SYNC_STALE=7200               # the local lock's staleness rule, on purpose
+SYNC_STALE=7200               # the same two hours as the local lock's rule
 SYNC_GIT_TIMEOUT=120
 SYNC_RCLONE_TIMEOUT=3600
 
@@ -560,9 +560,11 @@ sync_lock_take() {
     [[ "$ct" == <-> ]] || ct="$(date +%s)"
     age=$(( $(date +%s) - ct ))
     SYNC_LOCK_HOLDER="$subject, ${age}s old"
-    # Stale: older than the local lock's two hours, or this host's own lock
-    # whose pid is gone (the local lock's dead owner rule, so a crash here
-    # does not make this machine's next run wait two hours).
+    # Stale: older than two hours, or this host's own lock whose pid is gone
+    # (the local lock's dead owner rule, so a crash here does not make this
+    # machine's next run wait two hours). Unlike the local lock, two hours
+    # free it even while its owner runs: one machine cannot see the other's
+    # processes, and an owner that lost it stops after its current unit.
     if [ "$age" -gt "$SYNC_STALE" ] || \
        { [ "$host" = "${HOST:-$(hostname)}" ] && [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; }; then
       if sync_lock_push "$cur" "$new"; then

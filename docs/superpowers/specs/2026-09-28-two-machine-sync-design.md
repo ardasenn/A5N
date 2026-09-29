@@ -233,7 +233,7 @@ two runs starting in the same instant could both pass the look.
    look; so does this run's own pid in a lock it has not taken, left by an
    earlier process with the same pid. The two hour rule changed after
    review: it frees a lock only when its pid is alive but no A5N driver
-   (`ps -p <pid> -o command=` names none of the three scripts: another
+   (`ps -ww -p <pid> -o command=` names none of the three scripts: another
    program got a dead owner's pid) or when the lock holds no pid (older
    versions). A live driver keeps its lock however old. A suspend of more
    than two hours, or a raw file copy stuck for an hour per project, stops
@@ -611,9 +611,15 @@ this repository, like any other vault data.
   so the jobs behind it wait that long too.
 * A live A5N run keeps the local lock however old it is. One that truly
   hangs would keep it for good: the jobs behind it wait two hours and skip,
-  lint and digest with a notification, the ingest in its log only. Every
-  network call is bounded and the workers have a watchdog, so no such hang
-  is known.
+  lint and digest with a notification, the ingest in its log only, so on a
+  machine that runs only the ingest (a second machine with lint and digest
+  off) nothing says so. The scheduler never starts a second instance of a
+  job that still runs, so a stuck ingest held the next ones back before
+  this change too. Every network call is bounded and the workers have a
+  watchdog; the macOS notification (osascript) has no bound, and no hang
+  of it is known. The check reads the driver's name from its command line,
+  so a driver started under another name (a symlink) falls back to the two
+  hour rule.
 * Two machines scheduled at the same minute make one of them wait. Runs of
   34 to 83 minutes were observed on a real vault, so the waiting machine can
   miss its layer 2 for the day. Stagger the schedules.

@@ -1657,7 +1657,9 @@ t_local_suspend() {
   FAKE_RUNNER_SLEEP=6 FAKE_RUNNER_PIDFILE="$W/runner.pid" a5n m1 daily-ingest.sh &
   ing=$!
   wait_for "the ingest worker started" "[ -s '$W/runner.pid' ]" || return
-  a5n m1 weekly-lint.sh &
+  # A narrow COLUMNS in the waiter's environment made procps cut the
+  # command line short, and the check missed the running driver.
+  COLUMNS=20 a5n m1 weekly-lint.sh &
   lint=$!
   wait_for "the lint waits" "vlog m1 lint | grep -q 'waiting for the local lock'" || return
   # What three hours of suspend leave behind: a lock nobody touched since.
