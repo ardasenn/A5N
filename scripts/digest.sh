@@ -6,6 +6,10 @@
 #
 # Shares the .lock with ingest and lint so it can never race their commits.
 # An optional YYYY-MM argument is passed through to digest.py.
+
+# Every option the user's .zshenv set goes back to zsh's default before the
+# lock and sync code loads: daily-ingest.sh has the failures behind this.
+emulate -R zsh
 set -u
 
 SCRIPT_DIR="${0:A:h}"

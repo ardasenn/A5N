@@ -23,6 +23,10 @@
 # Testing: point A5N_CONFIG at a scratch config, and use A5N_LINT_PROJECTS
 # ("acme-shop other" narrows the project list) / A5N_UNIT_TIMEOUT /
 # A5N_NO_NOTIFY.
+
+# Every option the user's .zshenv set goes back to zsh's default before the
+# lock and sync code loads: daily-ingest.sh has the failures behind this.
+emulate -R zsh
 set -u
 
 SCRIPT_DIR="${0:A:h}"

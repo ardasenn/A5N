@@ -46,6 +46,9 @@ PASSED=0; FAILED=0; FAILURES=(); CURRENT=""
 # --- isolation ---------------------------------------------------------------
 export HOME="$TOP/home"
 export XDG_CONFIG_HOME="$HOME/.config"
+# Every zsh reads $ZDOTDIR/.zshenv, or $HOME/.zshenv without ZDOTDIR: none of
+# the user's reaches a driver here, only one a scenario writes itself.
+unset ZDOTDIR
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME="A5N Test" GIT_AUTHOR_EMAIL="test@example.invalid"
 export GIT_COMMITTER_NAME="A5N Test" GIT_COMMITTER_EMAIL="test@example.invalid"
@@ -1711,6 +1714,55 @@ t_local_suspend() {
   check_eq "their workers never ran at once" "" "$(overlap)"
   check_eq "the ingest processed its session" 1 "$(pages_for "$v" "$A1")"
   check_eq "the lint committed its report" 1 "$(git -C "$v" log --format=%s | grep -c '^chore: lint(alpha)')"
+}
+
+# Every zsh script reads the user's .zshenv first, the drivers too, and an
+# option set there changed what their patterns mean. With KSH_GLOB the
+# running driver check matched nothing, and a lock three hours old was
+# taken from a running driver. With SH_GLOB lib/common.sh and lib/sync.sh
+# did not even parse: every ingest logged a lock nobody held and skipped.
+t_local_zshenv() {
+  world localzshenv
+  machine_config m1 off yes alpha
+  machine_local m1
+  local v="$W/m1/vault" holder opt out sid day month
+  mkdir -p "$W/zdot"
+  # What ps shows for a running driver. It waits for its sleep instead of
+  # becoming it, so the name stays on its command line, and takes the sleep
+  # along when it is killed.
+  zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' daily-ingest.sh &
+  holder=$!
+  for opt in kshglob shglob; do
+    print -r -- "setopt $opt" > "$W/zdot/.zshenv"
+    print -r -- "$holder" > "$v/.a5n-logs/.lock"
+    touch -d '3 hours ago' "$v/.a5n-logs/.lock"
+    rm -f "$v/.a5n-logs/"*"$TODAY.log"(N)
+    out="$(ZDOTDIR="$W/zdot" A5N_LOCK_WAIT=3 a5n m1 weekly-lint.sh 2>&1)"
+    check_eq "the drivers parse with $opt set" "" "$(print -r -- "$out" | grep 'parse error')"
+    has "the lint waits for a running driver with $opt set" "$(vlog m1 lint)" "waiting for the local lock"
+    has_not "and leaves its lock alone ($opt)" "$(vlog m1 lint)" "stale lock found"
+    check_eq "the running driver's lock is untouched ($opt)" "$holder" \
+      "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+  done
+  kill "$holder"
+  wait "$holder" 2>/dev/null
+  # Whole runs, each first meeting a lock three hours old whose pid, this
+  # script's, is no A5N run: a stale lock, found through the patterns and
+  # the arithmetic the options change. FORCE_FLOAT made the lock's age a
+  # float and its comparison an error, and plain emulation leaves it set.
+  for opt sid day in kshglob "$A1" 2026-09-01 shglob "$A2" 2026-09-02 forcefloat "$B1" 2026-09-03; do
+    print -r -- "setopt $opt" > "$W/zdot/.zshenv"
+    session m1 alpha "$sid" "$day"
+    print -r -- $$ > "$v/.a5n-logs/.lock"
+    touch -d '3 hours ago' "$v/.a5n-logs/.lock"
+    ZDOTDIR="$W/zdot" A5N_LOCK_WAIT=3 a5n m1 daily-ingest.sh
+    check_eq "an ingest with $opt set processes its session" 1 "$(pages_for "$v" "$sid")"
+  done
+  # SH_GLOB alone: KSH_GLOB next to it makes those patterns parse again.
+  print -r -- "setopt shglob" > "$W/zdot/.zshenv"
+  month="$(date -d "$(date +%Y-%m-01) -1 month" +%Y-%m)"
+  ZDOTDIR="$W/zdot" a5n m1 digest.sh > /dev/null
+  check "a digest with shglob set is written" test -f "$v/digests/$month.md"
 }
 
 # The lock's small rules, each in a process of its own. A lock with this
