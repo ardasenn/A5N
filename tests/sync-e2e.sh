@@ -1,8 +1,8 @@
 #!/bin/zsh
 # End to end tests for A5N's [sync] section and the fixes that shipped with
 # it: the interrupted unit stash, .gitkeep placeholders, schedule "off" and
-# Linux notifications. The local lock the three jobs share is tested here
-# too (the t_local_* scenarios).
+# desktop notifications, the macOS one through stand ins. The local lock
+# the three jobs share is tested here too (the t_local_* scenarios).
 #
 # Everything happens inside one temporary directory, whose name contains
 # spaces on purpose so every path the drivers handle is exercised quoted. A
@@ -58,7 +58,7 @@ export A5N_SYNC_RETRY_DELAY=0 A5N_SYNC_POLL=1 A5N_SYNC_WAIT=3
 # the two hours a real run waits.
 export A5N_LOCK_POLL=1 A5N_LOCK_WAIT=30
 export A5N_PROMPT_FILE="$TOP/unit-prompt.md" A5N_LINT_PROMPT_FILE="$TOP/lint-prompt.md"
-unset A5N_NO_NOTIFY A5N_CONFIG A5N_MAX_UNITS A5N_UNIT_TIMEOUT A5N_LINT_PROJECTS
+unset A5N_NO_NOTIFY A5N_CONFIG A5N_MAX_UNITS A5N_UNIT_TIMEOUT A5N_LINT_PROJECTS A5N_OSASCRIPT
 unset FAKE_RUNNER_HOOK FAKE_RUNNER_SLEEP FAKE_RUNNER_PIDFILE FAKE_RUNNER_SHARED
 mkdir -p "$XDG_CONFIG_HOME" "$TOP/bin" "$A5N_TEST_CALLS"
 print -r -- "[fakedrive]
@@ -438,6 +438,41 @@ t_notify_linux() {
   check_eq "A5N_NO_NOTIFY silences it" "" "$(calls notify)"
 }
 
+# macOS has no timeout(1), and osascript ran with no bound: a notification
+# that hung held its run, and the run's local lock, for good, since a live
+# A5N run keeps its lock however old. Nothing here is macOS: uname answers
+# Darwin for this scenario only, and A5N_OSASCRIPT stands in for
+# /usr/bin/osascript, which no PATH shim can reach.
+t_notify_mac() {
+  world notifymac
+  machine_config m1 off yes alpha
+  machine_local m1
+  local v="$W/m1/vault" start took pid
+  mkdir -p "$W/darwin"
+  print -r -- '#!/bin/sh
+echo Darwin' > "$W/darwin/uname"
+  # It hangs and ignores TERM too, so only the KILL ends it. An ignored
+  # signal stays ignored across exec, and the sleep is the whole process.
+  print -r -- "#!/bin/sh
+trap '' TERM
+echo \$\$ > '$W/osascript.pid'
+printf '%s\n' \"\$*\" >> '$W/calls/osascript.log'
+exec sleep 40" > "$W/osascript"
+  chmod +x "$W/darwin/uname" "$W/osascript"
+  start=$SECONDS
+  # A missing unit prompt: the ingest notifies while it holds the lock.
+  PATH="$W/darwin:$PATH" A5N_OSASCRIPT="$W/osascript" A5N_PROMPT_FILE="$W/missing.md" \
+    a5n m1 daily-ingest.sh
+  took=$(( SECONDS - start ))
+  has "osascript got the title" "$(calls osascript)" 'with title "A5N ingest"'
+  has "osascript got the message" "$(calls osascript)" "unit prompt missing or empty"
+  check_eq "notify-send is not used on macOS" "" "$(calls notify)"
+  check "a hung notification ends after 10s and a 5s grace" test "$took" -lt 20
+  check "the run left no lock behind" test ! -e "$v/.a5n-logs/.lock"
+  pid="$(cat "$W/osascript.pid" 2>/dev/null)"
+  check "the hung notification was killed" sh -c "[ -n '$pid' ] && ! kill -0 '$pid' 2>/dev/null"
+}
+
 t_interrupted_unit() {
   world interrupted
   machine_config m1 off yes alpha
@@ -675,8 +710,8 @@ t_bounded() {
     LOGDIR="$W" LOG="$W/log" LOCK="$W/lock" VAULT="$W"
     log() { :; }
     notify_fail() { :; }
-    source "$REPO/scripts/lib/sync.sh"
-    sync_bounded 1 sleep 30
+    source "$REPO/scripts/lib/common.sh"
+    a5n_bounded 1 sleep 30
   )
   rc=$?
   check "a hung command is cut" test "$rc" -ne 0
@@ -687,8 +722,8 @@ t_bounded() {
     LOGDIR="$W" LOG="$W/log" LOCK="$W/lock" VAULT="$W"
     log() { :; }
     notify_fail() { :; }
-    source "$REPO/scripts/lib/sync.sh"
-    sync_bounded 5 sh -c 'exit 7'
+    source "$REPO/scripts/lib/common.sh"
+    a5n_bounded 5 sh -c 'exit 7'
   )
   check_eq "a finished command keeps its exit status" 7 "$?"
 }
@@ -700,6 +735,9 @@ lock_try() {  # <machine>: one attempt through the library, prints taken or busy
     VAULT="$PWD" LOGDIR="$PWD/.a5n-logs" LOG="$PWD/.a5n-logs/lock-test.log" LOCK="$PWD/.a5n-logs/.lock"
     log() { print -r -- "$*" >> "$LOG"; }
     notify_fail() { log "FAILED: $1"; }
+    # lib/sync.sh's contract: lib/common.sh first, its network commands run
+    # under a5n_bounded.
+    source "$REPO/scripts/lib/common.sh"
     source "$REPO/scripts/lib/sync.sh"
     # Distinct per machine: both subshells share this script's pid, and two
     # identical lock commits would make the race meaningless.

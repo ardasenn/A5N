@@ -4,11 +4,49 @@
 # sets LOGDIR, LOG and LOCK; recover_interrupted_unit and
 # commit_manual_changes run with the vault as their working directory.
 
+# A command under a wall clock: TERM after <seconds>, KILL five seconds
+# later. Without one a hung push kept the driver alive, so the pid in the
+# local lock stayed alive too, and every later run waited behind it and
+# skipped: a live A5N run keeps its lock however old. lib/sync.sh runs its
+# network commands through this, and the macOS notification below runs
+# through it too. macOS has no timeout(1): this is the TERM-trapped watchdog
+# the unit worker uses, whose sleep dies with it so nothing holds the
+# caller's stdout open.
+a5n_bounded() {  # <seconds> <command...>
+  local secs="$1" pid watchdog rc
+  shift
+  "$@" < /dev/null &
+  pid=$!
+  # KILL is the last word, for the sleep and for the command: a process
+  # started while a signal trap runs inherits that signal blocked, and the
+  # lock release runs from the drivers' TERM trap. With TERM alone the
+  # sleep outlived the run and systemctl stop waited 90 s for it, then
+  # marked the stop failed.
+  (
+    trap 'kill -KILL $! 2>/dev/null; exit 0' TERM
+    sleep "$secs" & wait $!
+    kill -TERM "$pid" 2>/dev/null || exit 0
+    sleep 5 & wait $!
+    kill -KILL "$pid" 2>/dev/null
+  ) > /dev/null 2>&1 &
+  watchdog=$!
+  wait "$pid"
+  rc=$?
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  return $rc
+}
+
 # Desktop notification, $1 title, $2 message. Never fails the run.
 a5n_desktop_notify() {
   [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
   if [ "$(uname)" = "Darwin" ]; then
-    /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1
+    # The ten seconds notify-send gets below, for the same reason. No hang
+    # of osascript has been seen, but it was the one call a macOS run made
+    # with no bound, and a run that hangs keeps its lock for good.
+    # A5N_OSASCRIPT replaces the path in tests/sync-e2e.sh: no PATH shim
+    # can reach an absolute one.
+    a5n_bounded 10 "${A5N_OSASCRIPT:-/usr/bin/osascript}" -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1
     return 0
   fi
   command -v notify-send >/dev/null 2>&1 || return 0

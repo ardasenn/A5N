@@ -4,9 +4,10 @@
 # sync behaves exactly as it did before this file existed.
 #
 # Contract with the driver: log() and notify_fail() are defined, VAULT,
-# LOGDIR, LOG and LOCK are set, lib/common.sh is sourced (sync_begin and
-# sync_ready_for_workers commit hand edits through it), and the functions
-# run with the vault as the working directory.
+# LOGDIR, LOG and LOCK are set, lib/common.sh is sourced (network commands
+# run under its a5n_bounded, and sync_begin and sync_ready_for_workers
+# commit hand edits through it), and the functions run with the vault as
+# the working directory.
 #
 # Pages travel through a git remote. Raw transcripts travel with them or,
 # when raw/ is kept out of git, through any storage rclone can reach
@@ -53,40 +54,11 @@ sync_on() { [ "${A5N_SYNC_ENABLED:-no}" = yes ]; }
 
 # --- helpers -------------------------------------------------------------------
 
-# Network commands run under a wall clock. Without one a hung push keeps the
-# driver alive, so the pid in the local lock stays alive too, and every
-# later run skips in silence behind it. macOS has no timeout(1): this is the
-# TERM-trapped watchdog the unit worker uses, whose sleep dies with it so
-# nothing holds the caller's stdout open.
-sync_bounded() {  # <seconds> <command...>
-  local secs="$1" pid watchdog rc
-  shift
-  "$@" < /dev/null &
-  pid=$!
-  # KILL is the last word, for the sleep and for the command: a process
-  # started while a signal trap runs inherits that signal blocked, and the
-  # lock release runs from the drivers' TERM trap. With TERM alone the
-  # sleep outlived the run and systemctl stop waited 90 s for it, then
-  # marked the stop failed.
-  (
-    trap 'kill -KILL $! 2>/dev/null; exit 0' TERM
-    sleep "$secs" & wait $!
-    kill -TERM "$pid" 2>/dev/null || exit 0
-    sleep 5 & wait $!
-    kill -KILL "$pid" 2>/dev/null
-  ) > /dev/null 2>&1 &
-  watchdog=$!
-  wait "$pid"
-  rc=$?
-  kill "$watchdog" 2>/dev/null
-  wait "$watchdog" 2>/dev/null
-  return $rc
-}
-
-# A network git command: bounded, and never waiting for a password nobody is
-# there to type.
+# A network git command: under a wall clock, lib/common.sh's a5n_bounded,
+# because a hung push would keep the driver and its local lock alive; and
+# never waiting for a password nobody is there to type.
 sync_git() {
-  sync_bounded "$SYNC_GIT_TIMEOUT" env GIT_TERMINAL_PROMPT=0 git "$@"
+  a5n_bounded "$SYNC_GIT_TIMEOUT" env GIT_TERMINAL_PROMPT=0 git "$@"
 }
 
 sync_ok() {
@@ -260,7 +232,7 @@ sync_raw() {  # <down|up>
       src="$VAULT/$ns/raw"
       dst="$A5N_SYNC_RAW_REMOTE/$ns/raw"
     fi
-    sync_bounded "$SYNC_RCLONE_TIMEOUT" rclone copy --immutable --exclude '.*' "$src" "$dst" >> "$LOG" 2>&1
+    a5n_bounded "$SYNC_RCLONE_TIMEOUT" rclone copy --immutable --exclude '.*' "$src" "$dst" >> "$LOG" 2>&1
     rc=$?
     # 3 is rclone's "directory not found": nothing uploaded for it yet.
     [ "$1" = down ] && [ "$rc" -eq 3 ] && rc=0
