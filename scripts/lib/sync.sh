@@ -14,9 +14,9 @@
 # section "Two machines, one vault" is the user's side of this file.
 #
 # SYNC_STATE after sync_begin: off (sync disabled); online; offline (the
-# remote could not be reached: capture and local commits go on, layer 2
-# does not); blocked (local commits conflict with the remote: a person has
-# to look, layer 2 does not run).
+# remote could not be reached, not even within sync.offline_after: capture
+# and local commits go on, layer 2 does not); blocked (local commits
+# conflict with the remote: a person has to look, layer 2 does not run).
 #
 # Every variable a colon follows is braced, ${var}:... . zsh reads $var:r
 # as a modifier, and an unbraced "<commit>:refs/a5n/lock" lost its ":r" and
@@ -38,7 +38,9 @@ SYNC_FAILING="$LOGDIR/.sync-failing-since"
 SYNC_LOCK_REF="refs/a5n/lock"
 SYNC_SEEN_REF="refs/a5n/seen-lock"
 
-# The waits. The environment overrides exist for tests/sync-e2e.sh.
+# The waits. The environment overrides exist for tests/sync-e2e.sh. How long
+# the start of a run waits for an unreachable remote is a setting instead,
+# sync.offline_after: it depends on the machine (see sync_reach).
 SYNC_WAIT="${A5N_SYNC_WAIT:-3600}"
 SYNC_POLL="${A5N_SYNC_POLL:-300}"
 SYNC_RETRY_DELAY="${A5N_SYNC_RETRY_DELAY:-20}"
@@ -165,24 +167,75 @@ sync_rebase_onto() {
 }
 
 # git pull --rebase in two halves, so "cannot reach the remote" and "cannot
-# rebase onto it" stay different outcomes. Three attempts: launchd starts a
-# job missed during sleep right at wake, before the network is back. 0
-# reachable (SYNC_REMOTE_BRANCH says whether the branch exists yet), 1 not.
+# rebase onto it" stay different outcomes. One attempt: 0 reachable
+# (SYNC_REMOTE_BRANCH says whether the branch exists yet), 1 not.
+sync_fetch_once() {
+  if sync_git fetch --no-tags "$A5N_SYNC_REMOTE" \
+      "+refs/heads/${A5N_SYNC_BRANCH}:refs/remotes/${A5N_SYNC_REMOTE}/${A5N_SYNC_BRANCH}" >> "$LOG" 2>&1; then
+    SYNC_REMOTE_BRANCH=1
+    return 0
+  fi
+  # A fresh remote has no branch yet: reachable, the first push creates it.
+  sync_git ls-remote --exit-code --heads "$A5N_SYNC_REMOTE" "$A5N_SYNC_BRANCH" > /dev/null 2>> "$LOG"
+  if [ $? -eq 2 ]; then
+    SYNC_REMOTE_BRANCH=0
+    return 0
+  fi
+  return 1
+}
+
+# Three attempts: launchd starts a job missed during sleep right at wake,
+# before the network is back. 0 reachable, 1 not.
 sync_fetch() {
   local try
   for try in 1 2 3; do
-    if sync_git fetch --no-tags "$A5N_SYNC_REMOTE" \
-        "+refs/heads/${A5N_SYNC_BRANCH}:refs/remotes/${A5N_SYNC_REMOTE}/${A5N_SYNC_BRANCH}" >> "$LOG" 2>&1; then
-      SYNC_REMOTE_BRANCH=1
-      return 0
-    fi
-    # A fresh remote has no branch yet: reachable, the first push creates it.
-    sync_git ls-remote --exit-code --heads "$A5N_SYNC_REMOTE" "$A5N_SYNC_BRANCH" > /dev/null 2>> "$LOG"
-    if [ $? -eq 2 ]; then
-      SYNC_REMOTE_BRANCH=0
-      return 0
-    fi
+    sync_fetch_once && return 0
     [ "$try" -lt 3 ] && sleep "$SYNC_RETRY_DELAY"
+  done
+  return 1
+}
+
+# Nobody logged in on this machine. With lingering on, systemd runs user
+# timers without a session, so a run missed while the machine was off
+# starts at boot, before anyone logs in, and a git credential kept in the
+# desktop keyring (gh keeps its token there) stays locked until the login.
+# loginctl calls such a user "lingering". macOS starts agents inside the
+# login session and has no loginctl: there, and whenever loginctl gives no
+# answer, somebody counts as logged in. The timeout: a question to logind
+# must never hold the run, and its lock, hostage.
+sync_no_login() {
+  command -v loginctl > /dev/null 2>&1 || return 1
+  [ "$(timeout 10 loginctl show-user "$(id -u)" -p State --value 2>/dev/null)" = lingering ]
+}
+
+# The start of a run only. A remote the three quick attempts could not reach
+# gets up to sync.offline_after seconds, counted from the first attempt,
+# before the run works offline. A timer with Persistent=true starts a run
+# the machine was off for at boot, when the network may not be up yet and,
+# with lingering on, nobody has logged in yet. Such a run used to go offline
+# every time, and an offline lint or digest waits a week or a month for its
+# next slot. While nobody is logged in the loop only watches for the login:
+# every fetch would ask the credential helper for a locked keyring, and gh
+# waits up to 60 s for it each time. When the time is up, one last attempt
+# anyway, for a credential that needs no login. The local lock is touched
+# every round, so a long wait never looks stale. 0 reachable, 1 not.
+sync_reach() {
+  local start=$SECONDS said=""
+  sync_fetch && return 0
+  while [ $(( SECONDS - start )) -lt "$A5N_SYNC_OFFLINE_AFTER" ]; do
+    sleep "$SYNC_RETRY_DELAY"
+    touch "$LOCK"
+    if [ $(( SECONDS - start )) -lt "$A5N_SYNC_OFFLINE_AFTER" ] && sync_no_login; then
+      [ "$said" = login ] || log "sync: $A5N_SYNC_REMOTE unreachable and nobody has logged in yet, waiting for a login (at most ${A5N_SYNC_OFFLINE_AFTER}s)"
+      said=login
+      continue
+    fi
+    [ -n "$said" ] || log "sync: $A5N_SYNC_REMOTE unreachable, trying again every ${SYNC_RETRY_DELAY}s (at most ${A5N_SYNC_OFFLINE_AFTER}s)"
+    said=retry
+    if sync_fetch_once; then
+      log "sync: $A5N_SYNC_REMOTE reachable after $(( SECONDS - start ))s"
+      return 0
+    fi
   done
   return 1
 }
@@ -286,12 +339,12 @@ sync_recover() {
   return 0
 }
 
-# Pull, then the raw download, then one try at the remote lock. Sets
-# SYNC_STATE.
+# Pull (waiting for a remote that is out of reach, see sync_reach), then the
+# raw download, then one try at the remote lock. Sets SYNC_STATE.
 sync_begin() {  # <job> <raw download: yes|no> <remote lock: yes|no>
   sync_on || { SYNC_STATE=off; return 0; }
   SYNC_JOB="$1"
-  if ! sync_fetch; then
+  if ! sync_reach; then
     SYNC_STATE=offline
     log "WARNING: sync: $A5N_SYNC_REMOTE unreachable, working offline: layer 2 skipped, commits wait for the next run"
     sync_failed "$A5N_SYNC_REMOTE unreachable"

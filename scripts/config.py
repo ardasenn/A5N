@@ -55,6 +55,7 @@ DEFAULTS = {
         "branch": "main",
         "raw_remote": "",
         "lock": "yes",
+        "offline_after": "900",
     },
 }
 
@@ -148,9 +149,18 @@ def _yes_no(key, value):
 
 def _validate_sync(sync):
     """Closed values on purpose: "enabled = true" would otherwise leave sync
-    silently off while the user believes both machines are in step."""
+    silently off while the user believes both machines are in step.
+    offline_after ends up in a shell test, where "15m" does not stop the
+    run: the wait is skipped, with a complaint on stderr and nothing in the
+    run's log."""
     sync["enabled"] = _yes_no("sync.enabled", sync["enabled"])
     sync["lock"] = _yes_no("sync.lock", sync["lock"])
+    wait = sync["offline_after"].strip()
+    if not re.fullmatch(r"[0-9]+", wait):
+        raise ConfigError(
+            f"sync.offline_after is '{sync['offline_after']}', must be a "
+            f"whole number of seconds (0 works offline without waiting).")
+    sync["offline_after"] = str(int(wait))
     for key in ("remote", "branch"):
         value = sync[key].strip()
         if sync["enabled"] == "yes" and (
@@ -277,6 +287,7 @@ def _emit_shell(cfg):
         "A5N_SYNC_BRANCH": cfg["sync"]["branch"],
         "A5N_SYNC_RAW_REMOTE": cfg["sync"]["raw_remote"],
         "A5N_SYNC_LOCK": cfg["sync"]["lock"],
+        "A5N_SYNC_OFFLINE_AFTER": cfg["sync"]["offline_after"],
         "A5N_MIN_SESSION_KB": cfg["limits"]["min_session_kb"],
         "A5N_SETTLE_HOURS": cfg["limits"]["settle_hours"],
         "A5N_UNIT_TIMEOUT": cfg["limits"]["unit_timeout"],
@@ -348,7 +359,8 @@ def main(argv):
         if sync["enabled"] == "yes":
             lock = "on" if sync["lock"] == "yes" else "off"
             print(f"sync: on, pages via {sync['remote']}/{sync['branch']}, "
-                  f"raw files via {sync['raw_remote'] or 'git'}, lock {lock}")
+                  f"raw files via {sync['raw_remote'] or 'git'}, lock {lock}, "
+                  f"offline after {sync['offline_after']}s")
         else:
             print("sync: off")
         stale = [k for k in ("claude_bin", "model") if k in cfg["agents"]]
