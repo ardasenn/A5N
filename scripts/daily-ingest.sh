@@ -40,16 +40,22 @@
 # tests, and A5N_LOCK_WAIT / A5N_LOCK_POLL the wait for the local lock
 # (scripts/lib/common.sh).
 
-# zsh runs the user's .zshenv before this line, and an option set there
-# reaches every line below. With KSH_GLOB the running driver check in
+# zsh runs the user's .zshenv before this line, and what it sets reaches
+# every line below. With KSH_GLOB the running driver check in
 # lib/common.sh matched nothing, and a waiting job took a live run's lock;
 # with SH_GLOB lib/common.sh and lib/sync.sh did not even parse, and every
 # ingest logged a lock nobody held and skipped. -R resets every option, not
 # only the ones plain emulation resets: that one leaves FORCE_FLOAT, which
-# turns the lock's age into a float and its comparison into an error.
-# Variables, PATH among them, stay as the .zshenv set them. zsh -x traces
-# up to here only; a setopt xtrace below this line traces the rest.
+# turns the lock's age into a float and its comparison into an error. No
+# emulation touches aliases, functions or SECONDS: an alias or a function
+# named ps fooled the running driver check just the same, and a float
+# SECONDS (typeset -F) ended every wait at its first look. Variables, PATH
+# among them, stay as the .zshenv set them. zsh -x traces up to here only;
+# a setopt xtrace below this line traces the rest.
 emulate -R zsh
+unalias -m '*'
+unfunction -m '*' 2>/dev/null
+typeset -i SECONDS
 set -u
 
 SCRIPT_DIR="${0:A:h}"

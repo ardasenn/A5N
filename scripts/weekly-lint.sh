@@ -24,9 +24,13 @@
 # ("acme-shop other" narrows the project list) / A5N_UNIT_TIMEOUT /
 # A5N_NO_NOTIFY.
 
-# Every option the user's .zshenv set goes back to zsh's default before the
-# lock and sync code loads: daily-ingest.sh has the failures behind this.
+# What the user's .zshenv set, options, aliases, functions and a float
+# SECONDS, goes before the lock and sync code loads: daily-ingest.sh has the
+# failures behind this.
 emulate -R zsh
+unalias -m '*'
+unfunction -m '*' 2>/dev/null
+typeset -i SECONDS
 set -u
 
 SCRIPT_DIR="${0:A:h}"

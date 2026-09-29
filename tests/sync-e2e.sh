@@ -1769,24 +1769,35 @@ t_local_zshenv() {
   world localzshenv
   machine_config m1 off yes alpha
   machine_local m1
-  local v="$W/m1/vault" holder opt out sid day month
+  local v="$W/m1/vault" holder env drv job opt out sid day month start took
   mkdir -p "$W/zdot"
   # What ps shows for a running driver. It waits for its sleep instead of
   # becoming it, so the name stays on its command line, and takes the sleep
   # along when it is killed.
   zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' daily-ingest.sh &
   holder=$!
-  for opt in kshglob shglob; do
-    print -r -- "setopt $opt" > "$W/zdot/.zshenv"
-    print -r -- "$holder" > "$v/.a5n-logs/.lock"
-    touch -d '3 hours ago' "$v/.a5n-logs/.lock"
-    rm -f "$v/.a5n-logs/"*"$TODAY.log"(N)
-    out="$(ZDOTDIR="$W/zdot" A5N_LOCK_WAIT=3 a5n m1 weekly-lint.sh 2>&1)"
-    check_eq "the drivers parse with $opt set" "" "$(print -r -- "$out" | grep 'parse error')"
-    has "the lint waits for a running driver with $opt set" "$(vlog m1 lint)" "waiting for the local lock"
-    has_not "and leaves its lock alone ($opt)" "$(vlog m1 lint)" "stale lock found"
-    check_eq "the running driver's lock is untouched ($opt)" "$holder" \
-      "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+  # Options, and what emulation leaves alone: an alias or a function that
+  # takes the name of ps, and a float SECONDS. FORCE_FLOAT and a float
+  # SECONDS ended the wait at its first look. Every driver, since each
+  # resets for itself.
+  waited_whole() {  # the wait was logged and took all of A5N_LOCK_WAIT
+    [ "$took" -ge 2 ] && vlog m1 "$job" | grep -q 'waiting for the local lock'
+  }
+  for env in 'setopt kshglob' 'setopt shglob' 'setopt forcefloat' 'alias ps=true' \
+      'ps() { true; }' 'typeset -F SECONDS'; do
+    print -r -- "$env" > "$W/zdot/.zshenv"
+    for drv job in daily-ingest.sh ingest weekly-lint.sh lint digest.sh digest; do
+      print -r -- "$holder" > "$v/.a5n-logs/.lock"
+      touch -d '3 hours ago' "$v/.a5n-logs/.lock"
+      rm -f "$v/.a5n-logs/"*"$TODAY.log"(N)
+      start=$SECONDS
+      out="$(ZDOTDIR="$W/zdot" A5N_LOCK_WAIT=2 a5n m1 "$drv" 2>&1)"
+      took=$(( SECONDS - start ))
+      check_eq "the $job parses with '$env'" "" "$(print -r -- "$out" | grep 'parse error')"
+      check "the $job waits the whole wait for a running driver ('$env')" waited_whole
+      check_eq "and leaves its lock alone ($job, '$env')" "$holder" \
+        "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+    done
   done
   kill "$holder"
   wait "$holder" 2>/dev/null
