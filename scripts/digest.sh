@@ -76,6 +76,15 @@ if [ -e "$LOCK" ]; then
   fi
 fi
 trap 'rm -f "$LOCK"' EXIT
+# A stop from the service manager arrives as TERM, and zsh skips the EXIT
+# trap when a signal it does not trap ends it: the lock stayed behind, and
+# systemd counts a oneshot killed by a signal as failed. Exiting from a
+# trap runs the EXIT trap, with a status the unit reads as a stop. The wait
+# for the remote made that window minutes long. INT and HUP are the same
+# stop for a run started by hand.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 print -r -- $$ > "$LOCK"
 
 cd "$VAULT" || exit 1
@@ -88,16 +97,13 @@ sync_recover || exit 0
 recover_interrupted_unit || exit 1
 
 # Manual edits stay out of the digest commit, same rule as the other jobs.
-if [ -n "$(git status --porcelain)" ]; then
-  log "WARNING: vault dirty before digest, committing manual edits separately"
-  git add -A >> "$LOG" 2>&1
-  git commit -m "chore: manual vault changes (pre-digest $(date +%F))" >> "$LOG" 2>&1
-fi
+commit_manual_changes digest
 
 # The digest counts the vault's history, so it pulls first: the other
 # machine's sessions belong in the numbers. No remote lock and no raw
-# download: it only writes digests/, and only one machine runs it.
-sync_begin digest no no
+# download: it only writes digests/, and only one machine runs it. A vault
+# that changed under the wait for the remote stops it untouched.
+sync_begin digest no no || exit 0
 case "$SYNC_STATE" in
   offline)
     notify "digest skipped: $A5N_SYNC_REMOTE unreachable, and a digest without the other machine's work would be wrong; run scripts/digest.sh by hand later" fail

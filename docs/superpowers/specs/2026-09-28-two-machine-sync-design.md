@@ -1,7 +1,9 @@
 # Two machines, one vault
 
 Date: 2026-09-28. Approved by the user in conversation, in two parts, together
-with the four decisions recorded below.
+with the four decisions recorded below. Revised on 2026-09-29: a run waits
+for a remote it cannot reach at its start (decision 2, "Waiting for the
+remote").
 
 ## Problem
 
@@ -40,6 +42,12 @@ of git (that is a one time manual migration).
    Only a short retry is allowed (three fetch attempts, 20 seconds apart),
    because launchd starts a job missed during sleep right at wake, before the
    network is back.
+   Revised on 2026-09-29: after those three attempts the run waits up to
+   `sync.offline_after` seconds (15 minutes) before it goes offline. A
+   systemd timer with lingering on starts a missed run at boot, before
+   anyone has logged in to open the keyring that holds the git credential,
+   and the three attempts end before the login. See "Waiting for the
+   remote".
 3. A notification fires when sync has been failing for more than 24 hours,
    counted from the FIRST failure since the last success. Counting from the
    last success would alert every Monday on a desktop that is off at weekends.
@@ -56,6 +64,7 @@ remote = origin
 branch = main
 raw_remote =
 lock = yes
+offline_after = 900
 ```
 
 * `enabled`, `lock`: `yes` or `no`, validated, because a typo like `true`
@@ -67,6 +76,14 @@ lock = yes
   raw files travel in git (the default vault layout) and rclone is never
   called. A trailing `/` is dropped.
 * `lock = no` drops the remote lock. Only safe when a single machine writes.
+* `offline_after` (added 2026-09-29): seconds a run keeps trying for a
+  remote it cannot reach at its start, before it works offline. A whole
+  number, validated: a value like `15m` would reach a shell test and turn
+  the wait off, with a complaint on stderr and nothing in the run's log.
+  `0` keeps only the three quick attempts. A
+  setting, unlike the other waits, because it depends on the machine: how
+  long after boot its user logs in, and whether its credential needs a
+  login at all.
 
 `[schedule]`: any of `ingest`, `lint`, `digest` may be `off`. The job's timer
 is then not installed, and removed if it was. A second machine sets `lint =
@@ -75,7 +92,8 @@ whole and two writers would take turns replacing each other's output.
 
 `config.py` validates the new keys, exports `A5N_SYNC_ENABLED`,
 `A5N_SYNC_REMOTE`, `A5N_SYNC_BRANCH`, `A5N_SYNC_RAW_REMOTE`,
-`A5N_SYNC_LOCK`, and `--check` prints one sync line.
+`A5N_SYNC_LOCK`, `A5N_SYNC_OFFLINE_AFTER`, and `--check` prints one sync
+line.
 
 ## Components
 
@@ -107,7 +125,13 @@ whole and two writers would take turns replacing each other's output.
 6. Fetch `+refs/heads/<branch>:refs/remotes/<remote>/<branch>`, up to three
    attempts. If all fail, `git ls-remote --exit-code --heads` separates a
    reachable remote without the branch (a fresh remote: the first push
-   creates it) from an unreachable one, which makes the run offline.
+   creates it) from an unreachable one. An unreachable remote gets up to
+   `offline_after` seconds more (see "Waiting for the remote").
+   Reached or not, steps 3 and 5 run once more (added 2026-09-29): the
+   fetch and its wait can take minutes and end just as somebody logs in.
+   A git operation in progress or another branch stops the run untouched,
+   hand edits get their own manual changes commit. Still unreachable after
+   that, the run is offline.
 7. Rebase local commits onto `<remote>/<branch>`. `git pull --rebase` is done
    as fetch plus rebase so that "no network" and "conflict" stay distinct. A
    conflict aborts the rebase, marks the run blocked and notifies with the
@@ -125,6 +149,51 @@ whole and two writers would take turns replacing each other's output.
 
 Namespaces are every vault root directory holding `sources/`, plus every
 configured project, the same rule the lint uses.
+
+### Waiting for the remote
+
+Added on 2026-09-29. A systemd timer with `Persistent=true` starts a run the
+machine was off for as soon as the user manager starts, and with lingering
+on that is at boot, before anyone logs in. On the first machine such a run
+started 4 seconds after boot, and the login came 52 and 53 seconds after
+boot on the two boots before this change. Its git credential comes from
+`gh`, which keeps its token in the GNOME keyring; the keyring opens at
+login, and gh 2.97.0 waits up to 60 seconds for it. When it fails at once,
+the three attempts are over in about 45 seconds, before the login. Every
+such run went offline, and an offline lint or digest waits a week or a
+month for its next slot, because the timer has already recorded the run.
+
+After the three attempts, until `offline_after` seconds after the first:
+
+1. Every 20 seconds the run touches the local lock, so a long wait never
+   looks stale, and asks `loginctl show-user <uid> -p State --value`.
+2. `lingering` means nobody is logged in: the run waits for a login and asks
+   the remote nothing, since every fetch would ask the credential helper
+   for a locked keyring.
+3. Any other answer, no answer, or no loginctl at all (macOS starts agents
+   inside the login session): one more fetch attempt.
+4. When the time is up while the run still waits for a login, one last
+   attempt anyway, for a credential that needs no login, such as an ssh key.
+
+Reached: a log line says after how many seconds, and the start goes on as
+above. Not reached: after the vault check below, the run is offline as
+before. The local lock is held throughout, as during the wait for the
+remote lock. `offline_after = 0` skips the wait.
+
+Either way the run then asks sync_recover's questions about the vault
+again, after every fetch at the start and not only after a wait, because
+the wait can end just as somebody logs in and starts working, and the
+quick attempts alone can take minutes when git hangs. A git operation in
+progress or another branch stops the run
+untouched, as at the start, and hand edits made meanwhile get a manual
+changes commit of their own (one helper in `lib/common.sh`, shared with the
+drivers' commit before the start). Found in review: without it a hand edit
+made git refuse the rebase, a conflict that was not there, and layer 2 was
+skipped; a rebase started by hand was aborted by A5N's own; another branch
+checked out meanwhile was rebased, processed and pushed to the sync branch.
+The digest traps TERM, INT and HUP like the other drivers now, so a stop
+during its wait removes the local lock and ends with a status the unit
+reads as a stop.
 
 ### Daily ingest
 
@@ -187,7 +256,8 @@ unit rules; a dropped digest commit notifies.
 The EXIT trap releases the remote lock if this run holds it. zsh skips
 the EXIT trap when a signal it does not trap ends it, and a service
 manager stops a run with TERM, so the ingest and the lint trap TERM, INT
-and HUP: the trap stops the worker first (started with `&` it ignores
+and HUP, and since the wait for the remote the digest too: the trap stops
+the worker first where there is one (started with `&` it ignores
 INT, and a kill of the driver alone never reaches it), then exits
 through the EXIT trap. Found when the first real run was stopped.
 Anything started while a signal trap runs inherits that signal blocked,
@@ -228,8 +298,8 @@ timestamp.
 
 ## Failure visibility
 
-* Offline: a WARNING log line, capture continues, pushes wait for the next
-  run.
+* Offline, once the wait for the remote is over: a WARNING log line,
+  capture continues, pushes wait for the next run.
 * The day rule: `.a5n-logs/.sync-failing-since` holds the time of the first
   failed sync since the last success. It is created at a failure, removed at
   a success, and when a failure finds it older than 24 hours, a notification
@@ -246,7 +316,8 @@ timestamp.
   `GIT_TERMINAL_PROMPT=0` makes a missing credential fail instead of waiting
   for input.
 * Test knobs, environment only: `A5N_SYNC_WAIT` (3600), `A5N_SYNC_POLL`
-  (300), `A5N_SYNC_RETRY_DELAY` (20).
+  (300), `A5N_SYNC_RETRY_DELAY` (20, also the pace of the wait for the
+  remote).
 
 ## Interrupted units, with sync on or off
 
@@ -360,6 +431,21 @@ Scenarios:
     path); a run stopped mid unit by TERM to its group, INT to its group
     or TERM to the driver alone leaves no worker behind, releases both
     locks and keeps the unit flag for the next run.
+14. Added with the wait for the remote (2026-09-29). The loginctl shim reads
+    the login state from a file each test world owns. A run that starts
+    while nobody is logged in waits for the login, asks the remote nothing
+    meanwhile, then processes its unit and pushes; a logged in run keeps
+    trying until a late remote answers; lint and digest run instead of
+    being skipped; the last attempt at the end of the wait reaches a remote
+    that came back while nobody logged in; a remote that never comes back
+    ends the run offline exactly as before, within `offline_after` plus one
+    round; an ingest, a lint or a digest stopped during the wait, by TERM
+    to its group or to the driver, ends at once, leaves no process and no
+    local lock, and captures nothing. After review: a hand edit made during
+    the wait gets its own commit and the run goes on (online and offline);
+    a rebase started by hand during the wait, or another branch checked
+    out, stops the run untouched. The older scenarios run with
+    `offline_after = 0`.
 
 Plus the standard checks: `py_compile`, `zsh -n` on every shell file,
 `config.py --check` on the test configs, and config validation cases.
@@ -392,8 +478,23 @@ this repository, like any other vault data.
 ## Known limits
 
 * A credential helper that reads a desktop keyring cannot work before login.
-  A timer that fires at boot before login runs offline: capture happens,
-  layer 2 waits for the next run.
+  A run that starts before login waits up to `offline_after` for one. If
+  nobody logs in by then it runs offline as before (capture happens, layer 2
+  waits for the next run, lint and digest are skipped), and its
+  notification may reach nobody: a desktop without a session may have no
+  notification daemon.
+* One local lock is shared by the three jobs, and a job that finds it held
+  is skipped. Two runs a timer starts at the same boot, say an ingest missed
+  at 09:07 and a lint missed on Friday, start in the same second and one of
+  them is skipped: an ingest until the next day, a lint or a digest until
+  its next slot. The lock is checked and written in two steps, so two runs
+  starting in the same instant can both pass. A run waiting for the remote
+  holds the lock like any other run. A fix is planned as a separate change.
+* After the wait for the remote lock, up to an hour, the run fetches and
+  rebases without asking sync_recover's questions again. A hand edit made
+  during that hour makes git refuse the rebase and the run is reported as
+  blocked. The check the wait for the remote got fits here too; planned
+  with the local lock change.
 * Two machines scheduled at the same minute make one of them wait. Runs of
   34 to 83 minutes were observed on a real vault, so the waiting machine can
   miss its layer 2 for the day. Stagger the schedules.

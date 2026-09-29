@@ -1,8 +1,8 @@
 # Shared by the three run drivers (daily-ingest.sh, weekly-lint.sh,
 # digest.sh): what they have in common that is not sync. Sourced, never
 # executed. Before sourcing, a driver defines log() and notify_fail() and
-# sets LOGDIR and LOG; recover_interrupted_unit runs with the vault as its
-# working directory.
+# sets LOGDIR and LOG; recover_interrupted_unit and commit_manual_changes
+# run with the vault as their working directory.
 
 # Desktop notification, $1 title, $2 message. Never fails the run.
 a5n_desktop_notify() {
@@ -61,4 +61,16 @@ recover_interrupted_unit() {
   fi
   rm -f "$UNIT_FLAG"
   return 0
+}
+
+# Hand written vault edits never ride in a job's own commits: they get one
+# commit of their own under an honest message. A driver calls this before
+# its first write, and sync_begin once more after the wait for the remote,
+# which can end just as somebody logs in and starts editing. <job>: ingest,
+# lint or digest.
+commit_manual_changes() {
+  [ -n "$(git status --porcelain)" ] || return 0
+  log "WARNING: vault dirty before $1, committing manual edits separately"
+  git add -A >> "$LOG" 2>&1
+  git commit -m "chore: manual vault changes (pre-$1 $(date +%F))" >> "$LOG" 2>&1
 }
