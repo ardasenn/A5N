@@ -126,8 +126,12 @@ line.
    attempts. If all fail, `git ls-remote --exit-code --heads` separates a
    reachable remote without the branch (a fresh remote: the first push
    creates it) from an unreachable one. An unreachable remote gets up to
-   `offline_after` seconds more (see "Waiting for the remote"); still
-   unreachable after that, the run is offline.
+   `offline_after` seconds more (see "Waiting for the remote").
+   Reached or not, steps 3 and 5 run once more (added 2026-09-29): the
+   fetch and its wait can take minutes and end just as somebody logs in.
+   A git operation in progress or another branch stops the run untouched,
+   hand edits get their own manual changes commit. Still unreachable after
+   that, the run is offline.
 7. Rebase local commits onto `<remote>/<branch>`. `git pull --rebase` is done
    as fetch plus rebase so that "no network" and "conflict" stay distinct. A
    conflict aborts the rebase, marks the run blocked and notifies with the
@@ -172,13 +176,15 @@ After the three attempts, until `offline_after` seconds after the first:
    attempt anyway, for a credential that needs no login, such as an ssh key.
 
 Reached: a log line says after how many seconds, and the start goes on as
-above. Not reached: the run is offline exactly as before. The local lock is
-held throughout, as during the wait for the remote lock. `offline_after = 0`
-skips the wait.
+above. Not reached: after the vault check below, the run is offline as
+before. The local lock is held throughout, as during the wait for the
+remote lock. `offline_after = 0` skips the wait.
 
 Either way the run then asks sync_recover's questions about the vault
-again, because the wait can end just as somebody logs in and starts
-working. A git operation in progress or another branch stops the run
+again, after every fetch at the start and not only after a wait, because
+the wait can end just as somebody logs in and starts working, and the
+quick attempts alone can take minutes when git hangs. A git operation in
+progress or another branch stops the run
 untouched, as at the start, and hand edits made meanwhile get a manual
 changes commit of their own (one helper in `lib/common.sh`, shared with the
 drivers' commit before the start). Found in review: without it a hand edit
@@ -250,7 +256,8 @@ unit rules; a dropped digest commit notifies.
 The EXIT trap releases the remote lock if this run holds it. zsh skips
 the EXIT trap when a signal it does not trap ends it, and a service
 manager stops a run with TERM, so the ingest and the lint trap TERM, INT
-and HUP: the trap stops the worker first (started with `&` it ignores
+and HUP, and since the wait for the remote the digest too: the trap stops
+the worker first where there is one (started with `&` it ignores
 INT, and a kill of the driver alone never reaches it), then exits
 through the EXIT trap. Found when the first real run was stopped.
 Anything started while a signal trap runs inherits that signal blocked,

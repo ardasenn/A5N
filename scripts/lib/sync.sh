@@ -353,8 +353,8 @@ sync_vault_ok() {
 sync_begin() {  # <job> <raw download: yes|no> <remote lock: yes|no>
   sync_on || { SYNC_STATE=off; return 0; }
   SYNC_JOB="$1"
-  local reached=0
-  sync_reach || reached=1
+  local unreachable=""
+  sync_reach || unreachable=1
   # The driver checked the vault and committed hand edits before the wait,
   # and the wait can end just as somebody logs in and starts working. Found
   # in review: a hand edit made git refuse the rebase below, a conflict that
@@ -365,7 +365,7 @@ sync_begin() {  # <job> <raw download: yes|no> <remote lock: yes|no>
   # and hand edits get a commit of their own.
   sync_vault_ok || return 1
   commit_manual_changes "$1"
-  if [ "$reached" -ne 0 ]; then
+  if [ -n "$unreachable" ]; then
     SYNC_STATE=offline
     log "WARNING: sync: $A5N_SYNC_REMOTE unreachable, working offline: layer 2 skipped, commits wait for the next run"
     sync_failed "$A5N_SYNC_REMOTE unreachable"
