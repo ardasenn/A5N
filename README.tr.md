@@ -180,9 +180,18 @@ dosyaları sadece büyür, iki makine de satır eklediyse ikisi de tutulur
 çakışma o makinenin işçilerini durdurur ve sana bildirim gönderir. Push'u
 çakışan bir oturum düşürülür ve bir sonraki koşuda yeniden işlenir.
 
-Remote'a ulaşılamazsa koşu yine yakalar ve yerelde commit'ler, işçileri
-atlar, bir sonraki seferde push eder. Senkron bir günden uzun süre başarısız
-olmaya devam ederse bildirim gelir.
+Koşunun başında remote'a ulaşılamazsa koşu `offline_after` saniye boyunca,
+varsayılan olarak 15 dakika, denemeye devam eder. En sık sebep, makine
+kendi saatinde kapalı olduğu için zamanlayıcının açılışta başlattığı
+koşudur: ağ henüz gelmemiş olabilir, Linux'ta da linger kullanıcı
+timer'larını giriş olmadan çalıştırdığı için henüz kimse giriş yapmamış
+olabilir; o zaman masaüstü keyring'inde duran git kimliği (`gh` token'ını
+orada tutar) hâlâ kilitlidir. Kimse giriş yapmamışken koşu remote'a hiç
+gitmez: girişi bekler, giriş olur olmaz dener. Süre dolduğunda remote'a
+hâlâ ulaşılamıyorsa koşu yine yakalar ve yerelde commit'ler, işçileri
+atlar, bir sonraki seferde push eder; lint ve digest bildirimle atlanır.
+`offline_after = 0` üç hızlı denemeden sonra vazgeçer. Senkron bir günden
+uzun süre başarısız olmaya devam ederse bildirim gelir.
 
 İkinci makinede `[schedule]` içinde `lint = off` ve `digest = off` yap: lint
 raporları ve digest'ler baştan yazılır, dolayısıyla tek bir makinenin işi

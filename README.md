@@ -176,9 +176,19 @@ writes that rule into the vault's `.git/info/attributes`). Any other conflict
 stops that machine's workers and notifies you. A session whose push
 conflicts is dropped and processed again on the next run.
 
-When the remote cannot be reached, the run still captures and commits
-locally, skips the workers, and pushes next time. If sync keeps failing for
-more than a day, you get a notification.
+When the remote cannot be reached at the start of a run, the run keeps
+trying for up to `offline_after` seconds, 15 minutes by default. The usual
+cause is a run the scheduler starts at boot because the machine was off at
+its time: the network may not be up yet, and on Linux, where lingering lets
+user timers run without a login, nobody may have logged in yet, so a git
+credential kept in the desktop keyring (where `gh` keeps its token) is
+still locked. While nobody is logged in, the run does not contact the
+remote at all: it waits for a login and tries right after it. If the remote
+is still out of reach when the time is up, the run captures and commits
+locally, skips the workers, and pushes next time; lint and digest are
+skipped with a notification. `offline_after = 0` gives up after three quick
+attempts. If sync keeps failing for more than a day, you get a
+notification.
 
 On the second machine, set `lint = off` and `digest = off` in `[schedule]`:
 lint reports and digests are rewritten whole, so one machine should own
