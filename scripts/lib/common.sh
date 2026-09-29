@@ -94,14 +94,16 @@ recover_interrupted_unit() {
   # two runs working in one tree. So this run stops, and the lock goes back
   # to that driver: its touches and its exit find the lock again, and every
   # later job waits for it. A pid that is this run's own was an earlier
-  # process's, and one that runs no A5N driver now was reused: either flag
-  # is a killed run's. The check asks ps, which sees a driver another user
-  # runs; kill -0 cannot signal one.
+  # process's, and one that does not run the driver of the flag's job now
+  # was reused, by another program or by another job's driver (catch-ups
+  # that start together after a reboot can get the last boot's pids):
+  # either flag is a killed run's. The check asks ps, which sees a driver
+  # another user runs; kill -0 cannot signal one.
   pid="${${what##*| pid }%% *}"
-  if [[ "$pid" == <-> ]] && [ "$pid" != $$ ] && lock_owner_is_a5n "$pid"; then
+  if [[ "$pid" == <-> ]] && [ "$pid" != $$ ] && pid_runs_job "$pid" "${what%% *}"; then
     lock_guarded lock_give "$pid" || lock_give "$pid"
     LOCK_TAKEN=""
-    notify_fail "A5N run pid $pid is still inside a unit (${what%% | pid *}) after losing its lock; this run stopped without touching the vault and gave the lock back"
+    notify_fail "A5N run pid $pid is still inside a unit (${what%% | pid *}) after losing its lock; this run stopped without touching the vault and gave the lock back; run it again by hand once that run is done"
     return 2
   fi
   if [ -n "$(git status --porcelain)" ]; then
@@ -176,6 +178,19 @@ lock_read() {
 # exported COLUMNS even into a pipe, and a cut line hid a running driver.
 lock_owner_is_a5n() {
   [[ "$(ps -ww -p "$1" -o command= 2>/dev/null)" == *(daily-ingest|weekly-lint|digest).sh* ]]
+}
+
+# Whether pid $1 runs the driver of job $2 (ingest, lint or digest), read
+# the same way.
+pid_runs_job() {
+  local script
+  case "$2" in
+    ingest) script=daily-ingest.sh ;;
+    lint) script=weekly-lint.sh ;;
+    digest) script=digest.sh ;;
+    *) return 1 ;;
+  esac
+  [[ "$(ps -ww -p "$1" -o command= 2>/dev/null)" == *"$script"* ]]
 }
 
 # A stale lock would swallow every later run. A dead owner pid frees it at
