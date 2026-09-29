@@ -49,13 +49,17 @@
 # turns the lock's age into a float and its comparison into an error. No
 # emulation touches aliases, functions or SECONDS: an alias or a function
 # named ps fooled the running driver check just the same, and a float
-# SECONDS (typeset -F) ended every wait at its first look. Variables, PATH
-# among them, stay as the .zshenv set them. zsh -x traces up to here only;
-# a setopt xtrace below this line traces the rest.
-emulate -R zsh
-unalias -m '*'
-unfunction -m '*' 2>/dev/null
-typeset -i SECONDS
+# SECONDS (typeset -F) ended every wait at its first look. \builtin, since
+# an alias or a function the .zshenv gave one of these names would run in
+# its place: a no-op emulate left SH_GLOB set (found by Codex). A function
+# named builtin, or a global alias, still gets past this; a .zshenv can run
+# any code before this line, and the reset is for what one sets by
+# accident. Variables, PATH among them, stay as the .zshenv set them. zsh -x
+# traces up to here only; a setopt xtrace below this line traces the rest.
+\builtin emulate -R zsh
+\builtin unalias -m '*'
+\builtin unfunction -m '*' 2>/dev/null
+\builtin typeset -i SECONDS
 set -u
 
 SCRIPT_DIR="${0:A:h}"

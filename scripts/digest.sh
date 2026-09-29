@@ -8,12 +8,13 @@
 # An optional YYYY-MM argument is passed through to digest.py.
 
 # What the user's .zshenv set, options, aliases, functions and a float
-# SECONDS, goes before the lock and sync code loads: daily-ingest.sh has the
+# SECONDS, goes before the lock and sync code loads, through \builtin so
+# none of them runs in place of these commands: daily-ingest.sh has the
 # failures behind this.
-emulate -R zsh
-unalias -m '*'
-unfunction -m '*' 2>/dev/null
-typeset -i SECONDS
+\builtin emulate -R zsh
+\builtin unalias -m '*'
+\builtin unfunction -m '*' 2>/dev/null
+\builtin typeset -i SECONDS
 set -u
 
 SCRIPT_DIR="${0:A:h}"

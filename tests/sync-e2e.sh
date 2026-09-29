@@ -1852,13 +1852,17 @@ t_local_zshenv() {
   holder=$!
   # Options, and what emulation leaves alone: an alias or a function that
   # takes the name of ps, and a float SECONDS. FORCE_FLOAT and a float
-  # SECONDS ended the wait at its first look. Every driver, since each
-  # resets for itself.
+  # SECONDS ended the wait at its first look. The last two stand in for
+  # the reset commands themselves (found by Codex): a no-op emulate left
+  # SH_GLOB set, a no-op unalias or unfunction left the ps above. Every
+  # driver, since each resets for itself.
   waited_whole() {  # the wait was logged and took all of A5N_LOCK_WAIT
     [ "$took" -ge 2 ] && vlog m1 "$job" | grep -q 'waiting for the local lock'
   }
   for env in 'setopt kshglob' 'setopt shglob' 'setopt forcefloat' 'alias ps=true' \
-      'ps() { true; }' 'typeset -F SECONDS'; do
+      'ps() { true; }' 'typeset -F SECONDS' \
+      'setopt shglob; emulate() { :; }; alias unalias=: ps=true' \
+      'setopt shglob; alias emulate=:; unfunction() { :; }; ps() { true; }'; do
     print -r -- "$env" > "$W/zdot/.zshenv"
     for drv job in daily-ingest.sh ingest weekly-lint.sh lint digest.sh digest; do
       print -r -- "$holder" > "$v/.a5n-logs/.lock"
