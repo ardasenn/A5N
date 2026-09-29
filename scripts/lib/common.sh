@@ -116,20 +116,37 @@ lock_read() {
   LOCK_AGE=$(( $(date +%s) - mtime ))
 }
 
-# A stale lock would swallow every later run. Two signals, either one frees
-# it: the owner pid is dead (a killed driver cannot run its exit trap, but
-# its pid dies with it: seen live when a launchctl bootout mid run left a
-# freshly touched lock that blocked runs for two hours), or the lock was not
-# touched for two hours, the fallback for a reused pid and for the empty
-# locks older versions wrote. A healthy run touches the lock after every
-# unit, so a live lock never ages that much.
+# Whether pid $1 runs one of the three drivers. ps on Linux and on macOS
+# both print the whole command line with -o command=.
+lock_owner_is_a5n() {
+  [[ "$(ps -p "$1" -o command= 2>/dev/null)" == *(daily-ingest|weekly-lint|digest).sh* ]]
+}
+
+# A stale lock would swallow every later run. A dead owner pid frees it at
+# once: a killed driver cannot run its exit trap, but its pid dies with it
+# (seen live when a launchctl bootout mid run left a freshly touched lock
+# that blocked runs for two hours). So does this run's own pid in a lock it
+# has not taken, left by an earlier process that had the pid: the run used
+# to wait for itself. Two hours without a touch free a lock too, but only
+# when its pid is no A5N run (another program got a dead owner's pid) or
+# when it has none (older versions wrote empty locks). A live A5N run keeps
+# its lock however old: a suspend, or a raw file copy stuck for an hour per
+# project, stops the touches and not the run, and a waiting job that took
+# such a lock stashed the running unit as a killed one's and ran next to it.
 lock_is_stale() {
-  if [[ "$LOCK_PID" == <-> ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
-    LOCK_STALE_WHY="owner pid $LOCK_PID is dead"
-    return 0
+  if [[ "$LOCK_PID" == <-> ]]; then
+    if [ "$LOCK_PID" = $$ ]; then
+      LOCK_STALE_WHY="it holds this run's own pid, left by an earlier process"
+      return 0
+    fi
+    if ! kill -0 "$LOCK_PID" 2>/dev/null; then
+      LOCK_STALE_WHY="owner pid $LOCK_PID is dead"
+      return 0
+    fi
+    lock_owner_is_a5n "$LOCK_PID" && return 1
   fi
   if [ "$LOCK_AGE" -gt "$LOCK_STALE" ]; then
-    LOCK_STALE_WHY="not touched for ${LOCK_AGE}s, previous run crashed"
+    LOCK_STALE_WHY="not touched for ${LOCK_AGE}s, and pid ${LOCK_PID:-?} is no A5N run"
     return 0
   fi
   return 1
@@ -138,10 +155,47 @@ lock_is_stale() {
 # One step. With noclobber, > opens the file with O_EXCL, so of two runs
 # that create it in the same instant exactly one succeeds. It used to be a
 # look first and a write after the trap setup, and two runs a timer started
-# at the same boot could both pass the look.
+# at the same boot could both pass the look. CLOBBER_EMPTY, off unless a
+# .zshenv turns it on, lets > reuse an empty file, and a lock is empty for
+# an instant after another run creates it. zsh before 5.9 has no such
+# option, hence the quiet failure.
 lock_create() {
   setopt localoptions noclobber
+  unsetopt clobberempty 2>/dev/null
   { print -r -- $$ > "$LOCK" } 2>/dev/null
+}
+
+# Runs "$@" in a subshell that holds the lock guard. Removing a lock is a
+# look, then a remove: two waiters that looked at a stale lock in the same
+# instant both removed it, the second one the lock the first had just
+# written, and both ran. So every remove happens under a second lock, one
+# the kernel holds, after a look taken under it too. The kernel drops it
+# when its process exits, so it can never go stale itself. A subshell holds
+# it, on a file nothing else opens, because closing any descriptor of the
+# file drops it as well. Without zsh/system or a writable file there is no
+# guard, and the remove goes on the way it did before the guard existed:
+# a stale lock that stays for good would swallow every later run.
+# 1 when another process held the guard for ten seconds.
+lock_guarded() {
+  touch "$LOCK_GUARD" 2>/dev/null
+  (
+    zmodload -F zsh/system b:zsystem 2>/dev/null && zsystem flock -t 10 "$LOCK_GUARD" 2>/dev/null
+    case $? in
+      0) ;;
+      2) exit 1 ;;
+      *) log "WARNING: cannot take the lock guard $LOCK_GUARD (it needs zsh/system and a writable file), going on without it" ;;
+    esac
+    "$@"
+  )
+}
+
+lock_takeover() {  # under the guard: 0 when this run's lock replaced a stale one
+  lock_read
+  lock_is_stale || return 1
+  rm -f "$LOCK"
+  lock_create || return 1
+  log "WARNING: stale lock found ($LOCK_STALE_WHY), removing and continuing"
+  return 0
 }
 
 # One attempt. 0 taken; 1 another run holds the lock (LOCK_PID, LOCK_AGE).
@@ -151,29 +205,25 @@ lock_take() {
     return 0
   fi
   lock_read
+  # Gone between the two looks: its owner has just left.
+  if [ ! -e "$LOCK" ] && lock_create; then
+    LOCK_TAKEN=1
+    return 0
+  fi
   lock_is_stale || return 1
-  # Removing a stale lock is a look, then a remove: two waiters that looked
-  # in the same instant both removed, the second one the lock the first had
-  # just written, and both ran. So the look, the remove and the new lock
-  # happen under a second lock, one the kernel holds: a waiter that gets it
-  # after another looks again and finds a live owner. The kernel drops it
-  # when its process exits, so it can never go stale itself. A subshell
-  # holds it, on a file nothing else opens, because closing any descriptor
-  # of the file drops it as well.
-  touch "$LOCK_GUARD" 2>/dev/null
-  if (
-    zmodload -F zsh/system b:zsystem && zsystem flock -t 10 "$LOCK_GUARD" || exit 1
-    lock_read
-    lock_is_stale || exit 1
-    rm -f "$LOCK"
-    lock_create || exit 1
-    log "WARNING: stale lock found ($LOCK_STALE_WHY), removing and continuing"
-  ); then
+  if lock_guarded lock_takeover; then
     LOCK_TAKEN=1
     return 0
   fi
   lock_read
   return 1
+}
+
+# The owner's sign of life: after every unit, and all through the waits for
+# the remote. -c, because a lock this run no longer has (taken over, removed
+# by hand) must not come back as an empty file that nobody removes.
+lock_touch() {
+  touch -c "$LOCK" 2>/dev/null
 }
 
 # The lock, waited for while another run holds it: a look every LOCK_POLL
@@ -194,13 +244,24 @@ lock_wait() {  # <job>: ingest, lint or digest
       return 0
     fi
   done
+  [ -t 2 ] && print -r -- "A5N $1: another A5N run (pid ${LOCK_PID:-?}) still holds the lock after ${LOCK_WAIT}s, this run gives up" >&2
   return 1
 }
 
-# EXIT trap. Only a lock this run took: a run stopped while it waited leaves
-# the other run's lock alone.
+lock_drop() {  # under the guard: the lock goes only while it holds this run's pid
+  [ "$(cat "$LOCK" 2>/dev/null)" = $$ ] && rm -f "$LOCK"
+  return 0
+}
+
+# EXIT trap. Only a lock this run took, and only while it is still this
+# run's: a run stopped while it waited leaves the other run's lock alone,
+# and so does a run whose lock was taken over or removed meanwhile. Under
+# the guard, so a waiter looking at the lock cannot see it vanish between
+# its look and its remove. A guard held for ten seconds by somebody else
+# does not keep this run's lock behind.
 lock_release() {
-  [ -n "$LOCK_TAKEN" ] && rm -f "$LOCK"
+  [ -n "$LOCK_TAKEN" ] || return 0
   LOCK_TAKEN=""
+  lock_guarded lock_drop || lock_drop
   return 0
 }

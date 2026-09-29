@@ -225,7 +225,7 @@ sync_reach() {
   sync_fetch && return 0
   while [ $(( SECONDS - start )) -lt "$A5N_SYNC_OFFLINE_AFTER" ]; do
     sleep "$SYNC_RETRY_DELAY"
-    touch "$LOCK"
+    lock_touch
     if [ $(( SECONDS - start )) -lt "$A5N_SYNC_OFFLINE_AFTER" ] && sync_no_login; then
       [ "$said" = login ] || log "sync: $A5N_SYNC_REMOTE unreachable and nobody has logged in yet, waiting for a login (at most ${A5N_SYNC_OFFLINE_AFTER}s)"
       said=login
@@ -329,19 +329,20 @@ sync_recover() {
   sync_vault_ok
 }
 
-# The user's side of sync_recover, asked again after the wait for the
-# remote. 0 the vault is on the sync branch with no git operation in
-# progress; 1 not (the user was told).
-sync_vault_ok() {
-  local op head
+# The user's side of sync_recover, asked again after the waits for the
+# remote and for its lock. 0 the vault is on the sync branch with no git
+# operation in progress; 1 not (the user was told what the stop skips, the
+# whole run unless the caller says otherwise).
+sync_vault_ok() {  # [what the stop skips]
+  local op head skipped="${1:-run}"
   op="$(sync_in_progress)"
   if [ -n "$op" ]; then
-    notify_fail "the vault has a $op in progress, run skipped; finish or abort it by hand"
+    notify_fail "the vault has a $op in progress, $skipped skipped; finish or abort it by hand"
     return 1
   fi
   head="$(git symbolic-ref -q --short HEAD)"
   if [ "$head" != "$A5N_SYNC_BRANCH" ]; then
-    notify_fail "the vault is on '${head:-a detached HEAD}', sync expects '$A5N_SYNC_BRANCH', run skipped"
+    notify_fail "the vault is on '${head:-a detached HEAD}', sync expects '$A5N_SYNC_BRANCH', $skipped skipped"
     return 1
   fi
   return 0
@@ -425,12 +426,14 @@ sync_ready_for_workers() {
   esac
   [ "$A5N_SYNC_LOCK" = yes ] || return 0
   [ -n "$SYNC_HAVE_LOCK" ] && return 0
-  local waited=0
+  local waited=0 skipped=run
+  # The ingest has captured and pushed by now: a stop skips its workers only.
+  [ "$SYNC_JOB" = ingest ] && skipped="layer 2"
   while [ -z "$SYNC_LOCK_REFUSED" ] && [ "$waited" -lt "$SYNC_WAIT" ]; do
     [ "$waited" -eq 0 ] && log "sync: waiting for the remote lock (every ${SYNC_POLL}s, at most ${SYNC_WAIT}s): $SYNC_LOCK_HOLDER"
     sleep "$SYNC_POLL"
     waited=$(( waited + SYNC_POLL ))
-    touch "$LOCK"
+    lock_touch
     sync_lock_take || continue
     # An hour is time enough for somebody to start working in the vault, so
     # sync_begin's questions once more: a git operation in progress or
@@ -438,8 +441,9 @@ sync_ready_for_workers() {
     # their own. Without them, seen in tests/sync-e2e.sh: a hand edit made
     # git refuse the rebase below, a conflict that was not there; a rebase
     # started by hand was aborted by A5N's own; another branch was rebased,
-    # processed and pushed to the sync branch.
-    sync_vault_ok || return 2
+    # processed and pushed to the sync branch. The hand edits go out with
+    # the next push: the first unit's, or the next run's.
+    sync_vault_ok "$skipped" || return 2
     commit_manual_changes "$SYNC_JOB"
     # The other machine may have processed units while this one waited.
     if ! sync_fetch; then

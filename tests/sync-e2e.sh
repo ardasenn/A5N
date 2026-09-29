@@ -708,6 +708,18 @@ lock_try() {  # <machine>: one attempt through the library, prints taken or busy
   )
 }
 
+# A snippet run by a zsh of its own with lib/common.sh sourced for m1's
+# vault, so $$ in it is that process's pid. Prints what the snippet prints.
+lock_lib() {  # <zsh code>
+  zsh -f -c '
+    VAULT="$1" LOGDIR="$1/.a5n-logs" LOG="$1/.a5n-logs/lib.log" LOCK="$1/.a5n-logs/.lock"
+    log() { print -r -- "$*" >> "$LOG"; }
+    notify_fail() { log "FAILED: $1"; }
+    source "$2/scripts/lib/common.sh"
+    eval "$3"
+  ' lock_lib "$W/m1/vault" "$REPO" "$1"
+}
+
 # One waiter for m1's local lock, in a process of its own, so its pid is its
 # own and stays alive while it holds the lock. It waits for $W/go, makes one
 # attempt through the library and writes taken or busy to $W/c<n>. A winner
@@ -1390,7 +1402,8 @@ t_lock_wait_user_rebase() {
   git -C "$v" rebase side > /dev/null 2>&1
   git --git-dir="$W/origin.git" update-ref -d refs/a5n/lock
   wait "$drv"
-  has "the run stopped and said why" "$(calls notify)" "has a rebase in progress, run skipped"
+  # Capture ran and went out before the wait: only the workers are skipped.
+  has "the run stopped and said why" "$(calls notify)" "has a rebase in progress, layer 2 skipped"
   check "the user's rebase is untouched" test -d "$v/.git/rebase-merge"
   check_eq "no unit ran" 0 "$(pages_for "$v" "$A1")"
   check_eq "the remote lock is released" "" "$(remote_lock)"
@@ -1417,11 +1430,13 @@ t_lock_wait_branch() {
   git -C "$v" commit -qm "a draft on another branch"
   git --git-dir="$W/origin.git" update-ref -d refs/a5n/lock
   wait "$drv"
-  has "the run stopped and said why" "$(calls notify)" "the vault is on 'drafts', sync expects 'main'"
+  has "the run stopped and said why" "$(calls notify)" \
+    "the vault is on 'drafts', sync expects 'main', layer 2 skipped"
   check "the draft did not reach the remote" test -z "$(remote_file draft.md)"
   check_eq "the run committed nothing on that branch" "a draft on another branch" \
     "$(git -C "$v" log -1 --format=%s drafts)"
   check_eq "no unit ran" 0 "$(pages_for "$v" "$A1")"
+  check_eq "the remote lock is released" "" "$(remote_lock)"
 }
 
 # The lint stopped by the vault check after the wait for the remote lock:
@@ -1446,6 +1461,7 @@ t_lint_lock_wait() {
   check_eq "no report reached the remote" "" "$(remote_file alpha/lint-report.md)"
   check_eq "nothing was committed on that branch" "$(git -C "$v" rev-parse main)" \
     "$(git -C "$v" rev-parse drafts)"
+  check_eq "the remote lock is released" "" "$(remote_lock)"
 }
 
 # Two runs a timer starts at the same boot, an ingest and a lint the machine
@@ -1521,6 +1537,7 @@ t_local_wait_ends() {
   out="$(A5N_CONFIG="$W/m1/config.ini" A5N_LOCK_WAIT=2 \
     script -qec "zsh ${(q)REPO}/scripts/daily-ingest.sh" /dev/null 2>&1)"
   has "a run on a terminal says it waits" "$out" "waiting"
+  has "and that it gives up" "$out" "gives up"
   check_eq "the holder's lock is untouched" "$holder" "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
   kill "$holder" 2>/dev/null
 }
@@ -1531,12 +1548,12 @@ t_local_stopped() {
   world localstopped
   machine_config m1 off yes alpha
   machine_local m1
-  local v="$W/m1/vault" holder script name how drv start i
+  local v="$W/m1/vault" holder script name how drv start i rc want
   sleep 300 &
   holder=$!
   print -r -- "$holder" > "$v/.a5n-logs/.lock"
   for script name in daily-ingest.sh ingest weekly-lint.sh lint digest.sh digest; do
-    for how in group-term driver-term group-int; do
+    for how want in group-term 143 driver-term 143 group-int 130; do
       rm -f "$v/.a5n-logs/"*"$TODAY.log"(N)
       A5N_CONFIG="$W/m1/config.ini" setsid zsh "$REPO/scripts/$script" > /dev/null 2>&1 &
       drv=$!
@@ -1549,7 +1566,11 @@ t_local_stopped() {
         group-int) kill -INT -- "-$drv" ;;
       esac 2>/dev/null
       wait "$drv" 2>/dev/null
+      rc=$?
       check "the $name stopped while waiting ends at once ($how)" test $(( SECONDS - start )) -lt 10
+      # The status the unit reads as a stop: the traps are set before the
+      # wait, and systemd counts a oneshot a signal killed as failed.
+      check_eq "and leaves as a stop ($name, $how)" "$want" "$rc"
       for i in {1..30}; do [ -z "$(session_left "$drv")" ] && break; sleep 0.1; done
       check_eq "the $name leaves nothing in its session ($how)" "" "$(session_left "$drv")"
       check_eq "the holder's lock is still there ($name, $how)" "$holder" \
@@ -1575,7 +1596,9 @@ t_local_stale() {
   has_not "without a wait" "$(vlog m1)" "waiting for the local lock"
   session m1 alpha "$A2" 2026-09-02
   rm -f "$v/.a5n-logs/$TODAY.log"
-  # Alive, this script, but the lock has not been refreshed for three hours.
+  # A pid that is alive but no A5N run, this script: what the pid of a dead
+  # owner looks like once another program got it. Three hours without a
+  # touch free such a lock.
   print -r -- $$ > "$v/.a5n-logs/.lock"
   touch -d '3 hours ago' "$v/.a5n-logs/.lock"
   a5n m1 daily-ingest.sh
@@ -1618,6 +1641,124 @@ t_local_race() {
     fi
   done
   ok "thirty rounds of three waiters at once, exactly one winner each"
+}
+
+# A suspend, or a raw file copy stuck for an hour per project, can leave a
+# running job's lock untouched for more than two hours. A job waiting
+# behind it took it for a crashed run's lock: it stashed the running unit's
+# half page, notified that a killed run left it, and ran next to it. A live
+# A5N run keeps its lock however old the lock is.
+t_local_suspend() {
+  world localsuspend
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" ing lint
+  FAKE_RUNNER_SLEEP=6 FAKE_RUNNER_PIDFILE="$W/runner.pid" a5n m1 daily-ingest.sh &
+  ing=$!
+  wait_for "the ingest worker started" "[ -s '$W/runner.pid' ]" || return
+  a5n m1 weekly-lint.sh &
+  lint=$!
+  wait_for "the lint waits" "vlog m1 lint | grep -q 'waiting for the local lock'" || return
+  # What three hours of suspend leave behind: a lock nobody touched since.
+  touch -d '3 hours ago' "$v/.a5n-logs/.lock"
+  wait "$ing"
+  wait "$lint"
+  has_not "the lint left the running ingest's lock alone" "$(vlog m1 lint)" "stale lock found"
+  has "it waited for the ingest to finish instead" "$(vlog m1 lint)" "local lock taken after"
+  check_eq "the running unit was not stashed" "" "$(git -C "$v" stash list)"
+  check_eq "no notification" "" "$(calls notify)"
+  check_eq "their workers never ran at once" "" "$(overlap)"
+  check_eq "the ingest processed its session" 1 "$(pages_for "$v" "$A1")"
+  check_eq "the lint committed its report" 1 "$(git -C "$v" log --format=%s | grep -c '^chore: lint(alpha)')"
+}
+
+# The lock's small rules, each in a process of its own. A lock with this
+# process's own pid was left by an earlier process that had the pid: the
+# run used to wait for itself. A lock is empty for an instant after another
+# run creates it, and must not be overwritten then, whatever zsh options
+# the user's .zshenv sets. And a run removes the lock only while it still
+# holds the run's own pid.
+t_local_lock_rules() {
+  world localrules
+  machine_config m1 off yes alpha
+  machine_local m1
+  local lock="$W/m1/vault/.a5n-logs/.lock"
+  check_eq "a lock with this run's own pid is taken" taken \
+    "$(lock_lib 'print -r -- $$ > "$LOCK"; lock_take && print taken || print busy')"
+  : > "$lock"
+  check_eq "an empty lock is not overwritten with CLOBBER_EMPTY set" busy \
+    "$(lock_lib 'setopt clobberempty; lock_create && print taken || print busy')"
+  check_eq "it is still empty" "" "$(cat "$lock")"
+  rm -f "$lock"
+  check_eq "a run's exit leaves a lock another pid holds by now" 999999 \
+    "$(lock_lib 'lock_take; print -r -- 999999 > "$LOCK"; lock_release; cat "$LOCK" 2>/dev/null')"
+}
+
+# The second lock cannot be taken: zsh/system missing, a file system
+# without fcntl locks, a file nobody may write. A stale lock then stayed for
+# good and every later run waited and skipped. Without the second lock the
+# run removes the stale lock the way it did before there was one, and says
+# so in its log.
+t_local_guard_broken() {
+  world localguard
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault"
+  mkdir "$v/.a5n-logs/.lock-guard"
+  print -r -- "$(zsh -fc 'print $$')" > "$v/.a5n-logs/.lock"
+  A5N_LOCK_WAIT=3 a5n m1 daily-ingest.sh
+  has "the log says the second lock is missing" "$(vlog m1)" "cannot take the lock guard"
+  has "the dead owner's lock was removed anyway" "$(vlog m1)" "stale lock found"
+  check_eq "and the run went on" 1 "$(pages_for "$v" "$A1")"
+}
+
+# A run whose lock was replaced or removed while it ran must leave the lock
+# as it finds it: its exit removes only its own lock, and its touch after a
+# unit does not bring a removed lock back as an empty file nobody removes.
+t_local_lock_replaced() {
+  world localreplaced
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" other
+  sleep 300 &
+  other=$!
+  print -r -- "print -r -- $other > '$v/.a5n-logs/.lock'" > "$W/hook.sh"
+  FAKE_RUNNER_HOOK="$W/hook.sh" a5n m1 daily-ingest.sh
+  check_eq "another run's lock survives this run's exit" "$other" \
+    "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+  kill "$other" 2>/dev/null
+  wait "$other" 2>/dev/null
+  rm -f "$v/.a5n-logs/.lock"
+  session m1 alpha "$A2" 2026-09-02
+  print -r -- "rm -f '$v/.a5n-logs/.lock'" > "$W/hook.sh"
+  FAKE_RUNNER_HOOK="$W/hook.sh" a5n m1 daily-ingest.sh
+  check "a removed lock does not come back empty" test ! -e "$v/.a5n-logs/.lock"
+}
+
+# The owner of the lock dies while a job waits for it: the next look frees
+# the lock and the job runs.
+t_local_owner_dies() {
+  world localdies
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" holder drv
+  sleep 300 &
+  holder=$!
+  print -r -- "$holder" > "$v/.a5n-logs/.lock"
+  a5n m1 daily-ingest.sh &
+  drv=$!
+  wait_for "the ingest waits" "vlog m1 | grep -q 'waiting for the local lock'" || {
+    kill "$holder" 2>/dev/null; return; }
+  kill "$holder"
+  # Reaped, or kill -0 still finds the pid: a zombie counts as alive.
+  wait "$holder" 2>/dev/null
+  wait "$drv"
+  has "the dead owner's lock was taken over" "$(vlog m1)" "stale lock found (owner pid $holder is dead)"
+  check_eq "then the ingest ran" 1 "$(pages_for "$v" "$A1")"
 }
 
 # --- runner ------------------------------------------------------------------

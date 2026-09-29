@@ -37,7 +37,8 @@
 # ways, pushes after every commit and holds a lock ref on the remote while
 # workers run; scripts/lib/sync.sh has the details and the reasons.
 # A5N_SYNC_WAIT / A5N_SYNC_POLL / A5N_SYNC_RETRY_DELAY shorten its waits in
-# tests.
+# tests, and A5N_LOCK_WAIT / A5N_LOCK_POLL the wait for the local lock
+# (scripts/lib/common.sh).
 set -u
 
 SCRIPT_DIR="${0:A:h}"
@@ -347,7 +348,7 @@ leave no out of schema path. Every other rule still applies."
     fi
   fi
   [ "$PUSH_RC" -eq 1 ] && break
-  touch "$LOCK"
+  lock_touch
   # The remote lock's twin of the touch above. A lock lost to another
   # machine stops layer 2.
   sync_lock_refresh || break

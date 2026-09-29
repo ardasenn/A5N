@@ -324,7 +324,7 @@ report file must have been written."
     fi
   fi
   [ "$PUSH_RC" -eq 1 ] && break
-  touch "$LOCK"
+  lock_touch
   sync_lock_refresh || break
 done
 
