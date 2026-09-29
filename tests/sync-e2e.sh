@@ -1,7 +1,8 @@
 #!/bin/zsh
 # End to end tests for A5N's [sync] section and the fixes that shipped with
 # it: the interrupted unit stash, .gitkeep placeholders, schedule "off" and
-# Linux notifications.
+# Linux notifications. The local lock the three jobs share is tested here
+# too (the t_local_* scenarios).
 #
 # Everything happens inside one temporary directory, whose name contains
 # spaces on purpose so every path the drivers handle is exercised quoted. A
@@ -53,6 +54,9 @@ export A5N_TEST_REAL_GIT="$REAL_GIT" A5N_TEST_REAL_RCLONE="$REAL_RCLONE"
 export A5N_TEST_CALLS="$TOP/calls"
 export A5N_BACKFILL=no
 export A5N_SYNC_RETRY_DELAY=0 A5N_SYNC_POLL=1 A5N_SYNC_WAIT=3
+# A scenario that meets a held local lock by mistake waits seconds, not
+# the two hours a real run waits.
+export A5N_LOCK_POLL=1 A5N_LOCK_WAIT=30
 export A5N_PROMPT_FILE="$TOP/unit-prompt.md" A5N_LINT_PROMPT_FILE="$TOP/lint-prompt.md"
 unset A5N_NO_NOTIFY A5N_CONFIG A5N_MAX_UNITS A5N_UNIT_TIMEOUT A5N_LINT_PROJECTS
 unset FAKE_RUNNER_HOOK FAKE_RUNNER_SLEEP FAKE_RUNNER_PIDFILE FAKE_RUNNER_SHARED
@@ -231,6 +235,11 @@ vlog() {  # <machine> [ingest|lint|digest]: that machine's log of today
 }
 calls() { cat "$W/calls/$1.log" 2>/dev/null; }   # <shim name>
 forget_calls() { rm -f "$W/calls/"*.log(N); }
+overlap() {  # the first moment two fake workers ran in one vault at once
+  awk '{ v = $0; sub(/^[a-z]+ [0-9]+ /, "", v) }
+       $1 == "start" && ++n[v] > 1 { print "two workers at once in " v; exit }
+       $1 == "end" { n[v]-- }' "$W/calls/workers.log" 2>/dev/null
+}
 
 fake_lock() {  # <message fields> <now|old>: another machine's lock
   local tree
@@ -697,6 +706,26 @@ lock_try() {  # <machine>: one attempt through the library, prints taken or busy
     SYNC_JOB="race-$1"
     if sync_lock_take; then print -r -- taken; else print -r -- busy; fi
   )
+}
+
+# One waiter for m1's local lock, in a process of its own, so its pid is its
+# own and stays alive while it holds the lock. It waits for $W/go, makes one
+# attempt through the library and writes taken or busy to $W/c<n>. A winner
+# holds the lock until $W/over exists.
+contender() {  # <n>
+  zsh -f -c '
+    VAULT="$1" LOGDIR="$1/.a5n-logs" LOG="$1/.a5n-logs/race.log" LOCK="$1/.a5n-logs/.lock"
+    log() { print -r -- "$*" >> "$LOG"; }
+    notify_fail() { log "FAILED: $1"; }
+    source "$2/scripts/lib/common.sh"
+    while [ ! -e "$3/go" ] && [ $SECONDS -lt 30 ]; do :; done
+    if lock_take; then
+      print -r -- taken > "$3/c$4"
+      while [ ! -e "$3/over" ] && [ $SECONDS -lt 60 ]; do sleep 0.05; done
+    else
+      print -r -- busy > "$3/c$4"
+    fi
+  ' contender "$W/m1/vault" "$REPO" "$W" "$1" 2>> "$W/contenders.err" &
 }
 
 t_lock_race() {
@@ -1306,6 +1335,178 @@ t_wait_branch() {
   check_eq "the run committed nothing on that branch" "a draft on another branch" \
     "$(git -C "$v" log -1 --format=%s drafts)"
   check "nothing was captured" test ! -e "$v/alpha/raw/sessions/$A1.jsonl"
+}
+
+# Two runs a timer starts at the same boot, an ingest and a lint the machine
+# was off for, start in the same second. One of them used to be skipped
+# until its next slot, a day or a week away, or both passed the lock check
+# and ran in one tree at once. Now one waits for the other.
+t_local_same_instant() {
+  world localsame
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault"
+  FAKE_RUNNER_SLEEP=2 a5n m1 daily-ingest.sh &
+  FAKE_RUNNER_SLEEP=2 a5n m1 weekly-lint.sh &
+  wait
+  check_eq "the ingest processed its session" 1 "$(pages_for "$v" "$A1")"
+  check_eq "the lint committed its report" 1 "$(git -C "$v" log --format=%s | grep -c '^chore: lint(alpha)')"
+  check_eq "exactly one of them waited" 1 \
+    "$({ vlog m1; vlog m1 lint; } | grep -c 'waiting for the local lock')"
+  check_eq "their workers never ran at once" "" "$(overlap)"
+  check_eq "nothing was skipped" "" "$(calls notify)"
+  check "the lock is gone" test ! -e "$v/.a5n-logs/.lock"
+}
+
+# A lint catch-up that started at boot still runs when the 09:07 ingest
+# fires: the ingest waits for it instead of losing the day.
+t_local_wait() {
+  world localwait
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" lint
+  FAKE_RUNNER_SLEEP=3 FAKE_RUNNER_PIDFILE="$W/runner.pid" a5n m1 weekly-lint.sh &
+  lint=$!
+  wait_for "the lint worker started" "[ -s '$W/runner.pid' ]" || return
+  a5n m1 daily-ingest.sh
+  wait "$lint"
+  has "the ingest waited" "$(vlog m1)" "waiting for the local lock"
+  check_eq "then it processed its session" 1 "$(pages_for "$v" "$A1")"
+  check_eq "the lint committed its report" 1 "$(git -C "$v" log --format=%s | grep -c '^chore: lint(alpha)')"
+  check_eq "their workers never ran at once" "" "$(overlap)"
+  check_eq "nothing was skipped" "" "$(calls notify)"
+}
+
+# A holder that never finishes. The wait ends, each job then does what it
+# did before the wait existed, and the holder's lock stays as it was. A run
+# started by hand on a terminal says that it waits.
+t_local_wait_ends() {
+  world localwaitends
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" holder start took out
+  sleep 300 &
+  holder=$!
+  print -r -- "$holder" > "$v/.a5n-logs/.lock"
+  start=$SECONDS
+  A5N_LOCK_WAIT=3 a5n m1 daily-ingest.sh
+  took=$(( SECONDS - start ))
+  has "the ingest waited" "$(vlog m1)" "waiting for the local lock"
+  has "then skipped as before" "$(vlog m1)" "run skipped"
+  check "it waited the whole wait" test "$took" -ge 3
+  check "and not much longer" test "$took" -lt 15
+  check "nothing was captured" test ! -e "$v/alpha/raw/sessions/$A1.jsonl"
+  check_eq "the ingest stays quiet, as before" "" "$(calls notify)"
+  A5N_LOCK_WAIT=3 a5n m1 weekly-lint.sh
+  has "the lint waited" "$(vlog m1 lint)" "waiting for the local lock"
+  has "then it was skipped loudly" "$(calls notify)" "lint skipped"
+  forget_calls
+  A5N_LOCK_WAIT=3 a5n m1 digest.sh > /dev/null
+  has "the digest waited" "$(vlog m1 digest)" "waiting for the local lock"
+  has "then it was skipped loudly" "$(calls notify)" "digest skipped"
+  out="$(A5N_CONFIG="$W/m1/config.ini" A5N_LOCK_WAIT=2 \
+    script -qec "zsh ${(q)REPO}/scripts/daily-ingest.sh" /dev/null 2>&1)"
+  has "a run on a terminal says it waits" "$out" "waiting"
+  check_eq "the holder's lock is untouched" "$holder" "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+  kill "$holder" 2>/dev/null
+}
+
+# systemctl stop, a shutdown or Ctrl-C can stop a run while it waits. It
+# leaves at once, and the lock it waited for is the other run's to remove.
+t_local_stopped() {
+  world localstopped
+  machine_config m1 off yes alpha
+  machine_local m1
+  local v="$W/m1/vault" holder script name how drv start i
+  sleep 300 &
+  holder=$!
+  print -r -- "$holder" > "$v/.a5n-logs/.lock"
+  for script name in daily-ingest.sh ingest weekly-lint.sh lint digest.sh digest; do
+    for how in group-term driver-term group-int; do
+      rm -f "$v/.a5n-logs/"*"$TODAY.log"(N)
+      A5N_CONFIG="$W/m1/config.ini" setsid zsh "$REPO/scripts/$script" > /dev/null 2>&1 &
+      drv=$!
+      wait_for "the $name waits ($how)" "vlog m1 $name | grep -q 'waiting for the local lock'" || {
+        kill "$holder" 2>/dev/null; return; }
+      start=$SECONDS
+      case "$how" in
+        group-term) kill -TERM -- "-$drv" ;;
+        driver-term) kill -TERM "$drv" ;;
+        group-int) kill -INT -- "-$drv" ;;
+      esac 2>/dev/null
+      wait "$drv" 2>/dev/null
+      check "the $name stopped while waiting ends at once ($how)" test $(( SECONDS - start )) -lt 10
+      for i in {1..30}; do [ -z "$(session_left "$drv")" ] && break; sleep 0.1; done
+      check_eq "the $name leaves nothing in its session ($how)" "" "$(session_left "$drv")"
+      check_eq "the holder's lock is still there ($name, $how)" "$holder" \
+        "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+    done
+  done
+  kill "$holder" 2>/dev/null
+}
+
+# A killed run cannot remove its lock. A dead owner, or a lock two hours
+# without a refresh, still frees it at once, with no wait.
+t_local_stale() {
+  world localstale
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" dead
+  dead="$(zsh -fc 'print $$')"
+  print -r -- "$dead" > "$v/.a5n-logs/.lock"
+  a5n m1 daily-ingest.sh
+  has "a dead owner's lock is removed" "$(vlog m1)" "stale lock found (owner pid $dead is dead)"
+  check_eq "the run went on" 1 "$(pages_for "$v" "$A1")"
+  has_not "without a wait" "$(vlog m1)" "waiting for the local lock"
+  session m1 alpha "$A2" 2026-09-02
+  rm -f "$v/.a5n-logs/$TODAY.log"
+  # Alive, this script, but the lock has not been refreshed for three hours.
+  print -r -- $$ > "$v/.a5n-logs/.lock"
+  touch -d '3 hours ago' "$v/.a5n-logs/.lock"
+  a5n m1 daily-ingest.sh
+  has "a lock three hours old is removed" "$(vlog m1)" "stale lock found"
+  check_eq "that run went on too" 1 "$(pages_for "$v" "$A2")"
+  has_not "without a wait either" "$(vlog m1)" "waiting for the local lock"
+  check "each run removed its own lock" test ! -e "$v/.a5n-logs/.lock"
+}
+
+# Waiters that find the same stale lock in the same instant: each removed
+# it and wrote its own, so the second remove could take the first waiter's
+# fresh lock away and both ran. Every round starts from one of the states a
+# waiter meets: a dead owner, a lock two hours without a refresh, no lock.
+t_local_race() {
+  world localrace
+  machine_config m1 off yes alpha
+  machine_local m1
+  local lock="$W/m1/vault/.a5n-logs/.lock" round n wins
+  for round in {1..30}; do
+    rm -f "$W/go" "$W/over" "$W"/c<1-3>(N)
+    case $(( round % 3 )) in
+      1) print -r -- "$(zsh -fc 'print $$')" > "$lock" ;;
+      2) print -r -- $$ > "$lock"; touch -d '3 hours ago' "$lock" ;;
+      0) rm -f "$lock" ;;
+    esac
+    for n in 1 2 3; do contender "$n"; done
+    sleep 0.3
+    : > "$W/go"
+    if ! wait_for "round $round decided" "[ -s '$W/c1' ] && [ -s '$W/c2' ] && [ -s '$W/c3' ]"; then
+      : > "$W/over"
+      wait
+      return
+    fi
+    wins="$(cat "$W"/c<1-3> | grep -cx taken)"
+    : > "$W/over"
+    wait
+    if [ "$wins" -ne 1 ]; then
+      bad "round $round had $wins winners"
+      return
+    fi
+  done
+  ok "thirty rounds of three waiters at once, exactly one winner each"
 }
 
 # --- runner ------------------------------------------------------------------

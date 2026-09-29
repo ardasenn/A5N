@@ -1,8 +1,8 @@
 # Shared by the three run drivers (daily-ingest.sh, weekly-lint.sh,
 # digest.sh): what they have in common that is not sync. Sourced, never
 # executed. Before sourcing, a driver defines log() and notify_fail() and
-# sets LOGDIR and LOG; recover_interrupted_unit and commit_manual_changes
-# run with the vault as their working directory.
+# sets LOGDIR, LOG and LOCK; recover_interrupted_unit and
+# commit_manual_changes run with the vault as their working directory.
 
 # Desktop notification, $1 title, $2 message. Never fails the run.
 a5n_desktop_notify() {
@@ -73,4 +73,134 @@ commit_manual_changes() {
   log "WARNING: vault dirty before $1, committing manual edits separately"
   git add -A >> "$LOG" 2>&1
   git commit -m "chore: manual vault changes (pre-$1 $(date +%F))" >> "$LOG" 2>&1
+}
+
+# --- the local lock -------------------------------------------------------------
+# $LOCK, .a5n-logs/.lock, keeps the three jobs apart on this machine: they
+# all commit into one git tree. It holds the owner's pid, and the owner
+# touches it after every unit and all through its waits for the remote.
+#
+# A job that finds it taken waits instead of skipping. A timer with
+# Persistent=true starts every run the machine was off for about four
+# seconds after boot, all at once, and the one that lost the lock was
+# skipped until its next slot: a day for the ingest, a week for the lint, a
+# month for the digest, because the timer had already recorded the run. On
+# 2026-09-28 a lint catch-up held the lock from 08:57 to 09:28; a 09:07
+# ingest would have lost its day. Two hours covers an ingest (34 to 95
+# minutes seen on a real vault) or a lint (about 30). It is A5N's own
+# timing, not the machine's, so it lives here and not in config.ini, like
+# the wait for the remote lock. The environment overrides exist for
+# tests/sync-e2e.sh.
+LOCK_WAIT="${A5N_LOCK_WAIT:-7200}"
+LOCK_POLL="${A5N_LOCK_POLL:-10}"
+LOCK_STALE=7200
+LOCK_GUARD="$LOGDIR/.lock-guard"
+LOCK_TAKEN=""        # set once this run holds the lock
+LOCK_PID=""          # the owner and the age of the lock last read,
+LOCK_AGE=0           # for the drivers' messages
+LOCK_STALE_WHY=""
+
+lock_read() {
+  local mtime
+  LOCK_PID="$(cat "$LOCK" 2>/dev/null)"
+  # GNU stat -f means "filesystem status", not mtime, and prints that block
+  # to stdout even while it exits nonzero, so the BSD-first order fed
+  # filesystem text to the arithmetic below and killed every run (Linux,
+  # 2026-08-23..25: three silent ingest failures behind one stale lock). GNU
+  # first, BSD second, and a digit guard so no platform can poison the math
+  # again. An unreadable mtime counts as fresh: clearing a live owner is
+  # worse than a wait, and the pid check is what actually clears a dead
+  # owner.
+  mtime="$(stat -c %Y "$LOCK" 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null)"
+  [[ "$mtime" == <-> ]] || mtime="$(date +%s)"
+  LOCK_AGE=$(( $(date +%s) - mtime ))
+}
+
+# A stale lock would swallow every later run. Two signals, either one frees
+# it: the owner pid is dead (a killed driver cannot run its exit trap, but
+# its pid dies with it: seen live when a launchctl bootout mid run left a
+# freshly touched lock that blocked runs for two hours), or the lock was not
+# touched for two hours, the fallback for a reused pid and for the empty
+# locks older versions wrote. A healthy run touches the lock after every
+# unit, so a live lock never ages that much.
+lock_is_stale() {
+  if [[ "$LOCK_PID" == <-> ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+    LOCK_STALE_WHY="owner pid $LOCK_PID is dead"
+    return 0
+  fi
+  if [ "$LOCK_AGE" -gt "$LOCK_STALE" ]; then
+    LOCK_STALE_WHY="not touched for ${LOCK_AGE}s, previous run crashed"
+    return 0
+  fi
+  return 1
+}
+
+# One step. With noclobber, > opens the file with O_EXCL, so of two runs
+# that create it in the same instant exactly one succeeds. It used to be a
+# look first and a write after the trap setup, and two runs a timer started
+# at the same boot could both pass the look.
+lock_create() {
+  setopt localoptions noclobber
+  { print -r -- $$ > "$LOCK" } 2>/dev/null
+}
+
+# One attempt. 0 taken; 1 another run holds the lock (LOCK_PID, LOCK_AGE).
+lock_take() {
+  if lock_create; then
+    LOCK_TAKEN=1
+    return 0
+  fi
+  lock_read
+  lock_is_stale || return 1
+  # Removing a stale lock is a look, then a remove: two waiters that looked
+  # in the same instant both removed, the second one the lock the first had
+  # just written, and both ran. So the look, the remove and the new lock
+  # happen under a second lock, one the kernel holds: a waiter that gets it
+  # after another looks again and finds a live owner. The kernel drops it
+  # when its process exits, so it can never go stale itself. A subshell
+  # holds it, on a file nothing else opens, because closing any descriptor
+  # of the file drops it as well.
+  touch "$LOCK_GUARD" 2>/dev/null
+  if (
+    zmodload -F zsh/system b:zsystem && zsystem flock -t 10 "$LOCK_GUARD" || exit 1
+    lock_read
+    lock_is_stale || exit 1
+    rm -f "$LOCK"
+    lock_create || exit 1
+    log "WARNING: stale lock found ($LOCK_STALE_WHY), removing and continuing"
+  ); then
+    LOCK_TAKEN=1
+    return 0
+  fi
+  lock_read
+  return 1
+}
+
+# The lock, waited for while another run holds it: a look every LOCK_POLL
+# seconds, at most LOCK_WAIT seconds. 0 taken; 1 still held when the wait
+# ran out (LOCK_PID, LOCK_AGE). The driver sets its traps first, so a stop
+# during the wait leaves as a stop.
+lock_wait() {  # <job>: ingest, lint or digest
+  local start=$SECONDS
+  lock_take && return 0
+  log "waiting for the local lock, held by pid ${LOCK_PID:-?} (${LOCK_AGE}s): a look every ${LOCK_POLL}s, at most ${LOCK_WAIT}s"
+  # A run started by hand must not sit there in silence; only such a run
+  # has a terminal.
+  [ -t 2 ] && print -r -- "A5N $1: waiting for another A5N run (pid ${LOCK_PID:-?}) to finish, at most ${LOCK_WAIT}s; Ctrl-C stops this one" >&2
+  while [ $(( SECONDS - start )) -lt "$LOCK_WAIT" ]; do
+    sleep "$LOCK_POLL"
+    if lock_take; then
+      log "local lock taken after a $(( SECONDS - start ))s wait"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# EXIT trap. Only a lock this run took: a run stopped while it waited leaves
+# the other run's lock alone.
+lock_release() {
+  [ -n "$LOCK_TAKEN" ] && rm -f "$LOCK"
+  LOCK_TAKEN=""
+  return 0
 }

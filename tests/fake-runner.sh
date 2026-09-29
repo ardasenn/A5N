@@ -15,10 +15,17 @@
 #   FAKE_RUNNER_PIDFILE  where to write this process's pid before sleeping
 #   FAKE_RUNNER_SHARED   text for line 3 of the root index.md: the shape of
 #                        an edit two machines can both make
+#
+# Every run writes a start and an end line, with its pid and working
+# directory, to $A5N_TEST_CALLS/workers.log: that is how a test sees two
+# workers running in one vault at the same time.
 set -u
 # Stopped with TERM, the runner takes its sleep along: a sleep left in the
 # driver's session would hide the leaks t_stopped_run looks for.
 trap 'kill $! 2>/dev/null; exit 143' TERM
+trace() { [ -n "${A5N_TEST_CALLS:-}" ] && print -r -- "$1 $$ $PWD" >> "$A5N_TEST_CALLS/workers.log"; }
+trace start
+trap 'trace end' EXIT
 
 prompt="${2:-}"
 kind="" project="" session="" raw="" date=""

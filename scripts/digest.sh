@@ -48,44 +48,27 @@ if [ ! -d "$VAULT/.git" ]; then
   exit 1
 fi
 
-if [ -e "$LOCK" ]; then
-  LOCK_PID="$(cat "$LOCK" 2>/dev/null)"
-  # GNU stat -f means "filesystem status", not mtime, and prints that block to
-  # stdout even while it exits nonzero — so the BSD-first order fed filesystem
-  # text to the arithmetic below and killed every run (Linux, 2026-08-23..25:
-  # three silent ingest failures behind one stale lock). GNU first, BSD second,
-  # and a digit guard so no platform can poison the math again. An unreadable
-  # mtime counts as fresh: clearing a live owner is worse than one skipped run,
-  # and the pid check above is what actually clears a dead owner.
-  LOCK_MTIME="$(stat -c %Y "$LOCK" 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null)"
-  [[ "$LOCK_MTIME" == <-> ]] || LOCK_MTIME="$(date +%s)"
-  LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
-  if [[ "$LOCK_PID" == <-> ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
-    log "WARNING: stale lock (owner pid $LOCK_PID is dead), removing and continuing"
-    rm -f "$LOCK"
-  elif [ "$LOCK_AGE" -gt 7200 ]; then
-    log "WARNING: stale lock (${LOCK_AGE}s), removing and continuing"
-    rm -f "$LOCK"
-  else
-    # Not silent on purpose: the digest exists to make things visible, and
-    # a silently skipped month looks identical to a broken pipeline. The
-    # 09:37 slot can legitimately collide with a long first-of-month
-    # ingest, which may hold the shared lock for hours.
-    notify "another job holds the lock (pid ${LOCK_PID:-?}, ${LOCK_AGE}s, probably the ingest), digest skipped; run scripts/digest.sh by hand"
-    exit 0
-  fi
-fi
-trap 'rm -f "$LOCK"' EXIT
+trap lock_release EXIT
 # A stop from the service manager arrives as TERM, and zsh skips the EXIT
 # trap when a signal it does not trap ends it: the lock stayed behind, and
 # systemd counts a oneshot killed by a signal as failed. Exiting from a
-# trap runs the EXIT trap, with a status the unit reads as a stop. The wait
-# for the remote made that window minutes long. INT and HUP are the same
-# stop for a run started by hand.
+# trap runs the EXIT trap, with a status the unit reads as a stop. The waits
+# for the local lock and for the remote made that window hours long. INT
+# and HUP are the same stop for a run started by hand.
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
-print -r -- $$ > "$LOCK"
+
+# The lock the three jobs share; lib/common.sh has its rules and the reason
+# for the wait.
+if ! lock_wait digest; then
+  # Not silent on purpose: the digest exists to make things visible, and a
+  # silently skipped month looks identical to a broken pipeline. Its slot on
+  # the first of the month can collide with a long ingest, and a catch-up
+  # at boot with the ingest and the lint that start with it.
+  notify "another job holds the lock (pid ${LOCK_PID:-?}, ${LOCK_AGE}s) after a ${LOCK_WAIT}s wait, probably a long ingest, digest skipped; run scripts/digest.sh by hand"
+  exit 0
+fi
 
 cd "$VAULT" || exit 1
 
