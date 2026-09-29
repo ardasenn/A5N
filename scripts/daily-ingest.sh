@@ -172,6 +172,11 @@ if ! lock_wait ingest; then
   exit 0
 fi
 
+# A unit whose driver still runs, one that lost its lock: stop before any
+# check below can end this run, since that exit would remove the lock where
+# it has to go back to that driver (lib/common.sh, unit_driver_runs).
+unit_driver_runs && exit 0
+
 cd "$VAULT" || exit 1
 
 if [ ! -s "$UNIT_PROMPT_FILE" ]; then

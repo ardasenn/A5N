@@ -131,6 +131,10 @@ if ! lock_wait lint; then
   exit 0
 fi
 
+# A unit whose driver still runs stops the lint before its own checks can
+# end it and remove the lock that has to go back (as in daily-ingest.sh).
+unit_driver_runs && exit 0
+
 cd "$VAULT" || exit 1
 
 if [ ! -s "$PROMPT_FILE" ]; then

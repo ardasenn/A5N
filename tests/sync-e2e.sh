@@ -1716,6 +1716,54 @@ t_local_suspend() {
   check_eq "the lint committed its report" 1 "$(git -C "$v" log --format=%s | grep -c '^chore: lint(alpha)')"
 }
 
+# The job that meets a unit whose driver still runs gives the lock back
+# before any check of its own can end the run. Those checks came first: a
+# missing prompt ended the ingest and the lint, another branch ended the
+# digest with sync on, and the exit removed the lock where it had to go back
+# (found by Codex). The unit's driver is played by a process whose command
+# line names the ingest's driver, and the flag names it.
+t_local_unit_alive_early() {
+  world localunitearly
+  machine_config m1 off yes alpha
+  machine_local m1
+  local v="$W/m1/vault" holder drv rc
+  zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' daily-ingest.sh &
+  holder=$!
+  for drv in daily-ingest.sh weekly-lint.sh; do
+    print -r -- "ingest alpha/1a2b3c4d | pid $holder | 2026-09-29 09:07:00" > "$v/.a5n-logs/.unit-in-progress"
+    rm -f "$v/.a5n-logs/.lock"
+    forget_calls
+    A5N_PROMPT_FILE="$W/missing.md" A5N_LINT_PROMPT_FILE="$W/missing.md" a5n m1 "$drv"
+    rc=$?
+    check_eq "a $drv with no prompt stops the way a skipped run does" 0 "$rc"
+    check_eq "and gives the lock back before that check ($drv)" "$holder" \
+      "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+    has "it names the running unit ($drv)" "$(calls notify)" \
+      "A5N run pid $holder is still inside a unit (ingest alpha/1a2b3c4d)"
+  done
+  kill "$holder"
+  wait "$holder" 2>/dev/null
+  world localunitearlysync
+  machine_config m1 on yes alpha
+  machine_new m1
+  v="$W/m1/vault"
+  a5n m1 daily-ingest.sh
+  git -C "$v" checkout -q -b drafts
+  zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' daily-ingest.sh &
+  holder=$!
+  print -r -- "ingest alpha/1a2b3c4d | pid $holder | 2026-09-29 09:07:00" > "$v/.a5n-logs/.unit-in-progress"
+  forget_calls
+  a5n m1 digest.sh > /dev/null
+  rc=$?
+  check_eq "a digest on another branch stops the way a skipped run does" 0 "$rc"
+  check_eq "and gives the lock back before that check (digest)" "$holder" \
+    "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+  has "it names the running unit (digest)" "$(calls notify)" \
+    "A5N run pid $holder is still inside a unit (ingest alpha/1a2b3c4d)"
+  kill "$holder"
+  wait "$holder" 2>/dev/null
+}
+
 # A job that found the unit flag of a driver that still runs, whose lock was
 # removed by hand say, took the unit for a killed run's: it stashed the half
 # written page, notified that a killed run left it, and ran next to the
@@ -1874,6 +1922,22 @@ t_local_lock_rules() {
     "$(lock_lib ': daily-ingest.sh; cd "$VAULT"; print -r -- "ingest alpha/1a2b3c4d | pid $$ | now" > "$UNIT_FLAG"; recover_interrupted_unit; print -r -- $?')"
   has "its leftovers went to the stash" "$(git -C "$W/m1/vault" stash list)" \
     "a5n: interrupted unit (ingest alpha/1a2b3c4d"
+  # The recovery asks as well, for a driver without its lock that starts
+  # its next unit after the run's first look: that unit stays where it is,
+  # and its driver gets the lock.
+  local holder stashes
+  zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' daily-ingest.sh &
+  holder=$!
+  print -r -- "ingest alpha/5e6f7a8b | pid $holder | now" > "$W/m1/vault/.a5n-logs/.unit-in-progress"
+  print -r -- "a running unit's half page" > "$W/m1/vault/half-running.md"
+  stashes="$(git -C "$W/m1/vault" stash list | wc -l)"
+  rm -f "$lock"
+  check_eq "the recovery leaves a running driver's unit alone" 2 \
+    "$(lock_lib 'cd "$VAULT"; lock_take; recover_interrupted_unit; print -r -- $?')"
+  check_eq "and stashes nothing" "$stashes" "$(git -C "$W/m1/vault" stash list | wc -l)"
+  check_eq "and gives that driver the lock" "$holder" "$(cat "$lock" 2>/dev/null)"
+  kill "$holder"
+  wait "$holder" 2>/dev/null
 }
 
 # The second lock cannot be taken: zsh/system missing, a file system

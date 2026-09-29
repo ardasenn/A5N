@@ -77,35 +77,45 @@ unit_end() {
   rm -f "$UNIT_FLAG"
 }
 
+# The flag of a driver that still runs is no killed run's. This run holds
+# the lock only because that driver's was removed by hand or taken as stale,
+# and stashing its unit took the half page from under it and left two runs
+# working in one tree. So this run stops, and the lock goes back to that
+# driver: its touches and its exit find the lock again, and every later job
+# waits for it. A pid that is this run's own was an earlier process's, and
+# one that does not run the driver of the flag's job now was reused, by
+# another program or by another job's driver (catch-ups that start together
+# after a reboot can get the last boot's pids): either flag is a killed
+# run's. The check asks ps, which sees a driver another user runs; kill -0
+# cannot signal one. The drivers ask right after they take the lock: any of
+# their own checks after it can end the run, and the exit removed the lock
+# where it had to go back. recover_interrupted_unit asks again, since a
+# driver without its lock can start its next unit meanwhile. 0 when that
+# driver runs: the lock went back and the user was told.
+unit_driver_runs() {
+  [ -e "$UNIT_FLAG" ] || return 1
+  local what pid
+  what="$(cat "$UNIT_FLAG" 2>/dev/null)"
+  pid="${${what##*| pid }%% *}"
+  [[ "$pid" == <-> ]] && [ "$pid" != $$ ] && pid_runs_job "$pid" "${what%% *}" || return 1
+  lock_guarded lock_give "$pid" || lock_give "$pid"
+  LOCK_TAKEN=""
+  notify_fail "A5N run pid $pid is still inside a unit (${what%% | pid *}) after losing its lock; this run stopped without touching the vault and gave the lock back; run it again by hand once that run is done"
+  return 0
+}
+
 # Run before the "manual changes" commit. A driver killed mid unit (a
 # service stopped, a lid closed on a dying battery) leaves half written
 # pages, and that commit used to sweep them into history as if a person had
 # written them; with sync on it would push them to the other machine too.
 # They go to a stash rather than away: the user may have edited the vault by
 # hand since the crash, and those edits must survive. 0 go on; 1 stop, the
-# stash failed; 2 stop, the unit's driver still runs (the user was told).
+# stash failed; 2 stop, the unit's driver still runs (unit_driver_runs).
 recover_interrupted_unit() {
   [ -e "$UNIT_FLAG" ] || return 0
-  local what pid
+  unit_driver_runs && return 2
+  local what
   what="$(cat "$UNIT_FLAG" 2>/dev/null)"
-  # The flag of a driver that still runs is no killed run's. This run holds
-  # the lock only because that driver's was removed by hand or taken as
-  # stale, and stashing its unit took the half page from under it and left
-  # two runs working in one tree. So this run stops, and the lock goes back
-  # to that driver: its touches and its exit find the lock again, and every
-  # later job waits for it. A pid that is this run's own was an earlier
-  # process's, and one that does not run the driver of the flag's job now
-  # was reused, by another program or by another job's driver (catch-ups
-  # that start together after a reboot can get the last boot's pids):
-  # either flag is a killed run's. The check asks ps, which sees a driver
-  # another user runs; kill -0 cannot signal one.
-  pid="${${what##*| pid }%% *}"
-  if [[ "$pid" == <-> ]] && [ "$pid" != $$ ] && pid_runs_job "$pid" "${what%% *}"; then
-    lock_guarded lock_give "$pid" || lock_give "$pid"
-    LOCK_TAKEN=""
-    notify_fail "A5N run pid $pid is still inside a unit (${what%% | pid *}) after losing its lock; this run stopped without touching the vault and gave the lock back; run it again by hand once that run is done"
-    return 2
-  fi
   if [ -n "$(git status --porcelain)" ]; then
     if ! git stash push -u -m "a5n: interrupted unit ($what)" >> "$LOG" 2>&1; then
       notify_fail "an interrupted unit ($what) left changes and git stash failed, run stopped, look by hand"

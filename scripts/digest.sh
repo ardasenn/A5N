@@ -78,6 +78,10 @@ if ! lock_wait digest; then
   exit 0
 fi
 
+# A unit whose driver still runs stops the digest before its own checks can
+# end it and remove the lock that has to go back (as in daily-ingest.sh).
+unit_driver_runs && exit 0
+
 cd "$VAULT" || exit 1
 
 # Before anything writes: with sync, A5N's own interrupted rebase is undone
