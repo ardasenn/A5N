@@ -289,10 +289,16 @@ Three hardening changes followed the second review, the same day:
    parse fails before any function runs. Plain `emulate zsh` resets only
    the options emulation cares about and leaves `FORCE_FLOAT`, which made
    the lock's age a float and its comparison an error, and `CLOBBER_EMPTY`
-   (item 7); `-R` resets them all. Variables, `PATH` among them, stay as
-   the `.zshenv` set them. The create keeps its own `CLOBBER_EMPTY` line
-   for a caller that sources the library on its own, as the tests do. The
-   cost: `zsh -x` traces a driver up to that line only.
+   (item 7); `-R` resets them all. The review of this change found three
+   more ways in that no emulation touches, and the drivers drop them right
+   after: an alias or a function named `ps` fed the running driver check
+   nothing, just like `KSH_GLOB` (`unalias -m '*'`, `unfunction -m '*'`),
+   and a float `SECONDS` (`typeset -F`) made the wait's arithmetic a float
+   and ended the wait at its first look (`typeset -i SECONDS`). Variables,
+   `PATH` among them, stay as the `.zshenv` set them. The create keeps its
+   own `CLOBBER_EMPTY` line for a caller that sources the library on its
+   own, as the tests do. The cost: `zsh -x` traces a driver up to that
+   line only.
 10. The macOS notification gets the bound notify-send has on Linux, ten
     seconds, through the watchdog the network commands use. That watchdog,
     `a5n_bounded`, moved from `lib/sync.sh` to `lib/common.sh`, which
@@ -459,9 +465,10 @@ sync on, would push them to the other machine).
   tree clean: a log line. The flag is then removed. If the stash fails the
   run notifies and exits: those changes are never committed as manual edits.
 * Added with the lock hardening (2026-09-29): before any of that, the pid in
-  the flag is checked. When `ps` shows an A5N driver with that pid, and it
-  is not this run's own, the unit is still running: its driver lost the
-  lock, removed by hand, or taken from a driver another user runs, whose pid
+  the flag is checked. When `ps` shows that pid running the driver of the
+  flag's own job (its first word: ingest, lint or digest), and it is not
+  this run's own, the unit is still running: its driver lost the lock,
+  removed by hand, or taken from a driver another user runs, whose pid
   `kill -0` cannot signal and the lock rule counts as dead (`ps` still sees
   it). The stash took the half page from under that unit, and this run
   worked next to it. Now the run leaves the tree and the flag alone, writes
@@ -469,10 +476,15 @@ sync on, would push them to the other machine).
   exit find the lock again and later jobs wait for it, notifies ("A5N run
   pid N is still inside a unit (ingest alpha/1a2b3c4d) after losing its
   lock; this run stopped without touching the vault and gave the lock
-  back") and exits 0, the way a skipped run does. Ingest, lint and digest
-  behave alike. A flag whose pid is dead, is this run's own (an earlier
-  process had it) or runs no A5N driver (reused) is a killed run's unit, as
-  before.
+  back; run it again by hand once that run is done") and exits 0, the way
+  a skipped run does. Ingest, lint and digest behave alike. A flag whose
+  pid is dead, is this run's own (an earlier process had it), or runs a
+  program that is no driver of that job is a killed run's unit, as before.
+  The job has to match since the review of this change: a shutdown during
+  a unit leaves its flag, the catch-up runs after the reboot start
+  together and can get the last boot's pids, and a killed ingest's flag
+  naming the pid of the lint now waiting for the lock stopped the ingest
+  with a false notification and lost its day.
 
 ## setup.sh
 
@@ -616,22 +628,25 @@ Scenarios:
     macOS: `uname` answers `Darwin` for one scenario and `A5N_OSASCRIPT`
     points at a fake that hangs and ignores TERM; the ingest that notifies
     ends within 20 seconds (10, then 5 of grace), the fake is killed, and
-    the lock is gone. zsh options: with a `.zshenv` of the scenario's own
-    that sets `KSH_GLOB`, then `SH_GLOB`, the drivers parse, and a lint
-    waits for a live process whose command line names a driver although
-    its lock is three hours old, and leaves that lock alone; ingests with
+    the lock is gone. The `.zshenv`: with one of the scenario's own that
+    sets `KSH_GLOB`, `SH_GLOB` or `FORCE_FLOAT`, an alias or a function
+    named `ps`, or a float `SECONDS`, every driver parses, waits the whole
+    wait for a live process whose command line names a driver although its
+    lock is three hours old, and leaves that lock alone; ingests with
     `KSH_GLOB`, `SH_GLOB` or `FORCE_FLOAT` set take over a lock three hours
     old whose pid is no A5N run and process their sessions, and a digest
     with `SH_GLOB` set is written (`SH_GLOB` alone: with `KSH_GLOB` next to
     it those patterns parse again, and the check missed the digest's
-    reset). A running ingest whose lock was removed by hand: a lint started
-    next to it exits 0, stashes nothing, keeps the flag, notifies, gives the
-    lock back and runs no worker, and the ingest finishes its unit and
-    removes the lock. A flag whose pid runs no A5N driver, or holds the
-    run's own pid, is stashed as before. Each check was run against a copy
-    with its fix removed, and failed there: the bound, the reset in each
-    driver, `-R` itself, the live unit check, its own pid and A5N rules, and
-    the lock given back.
+    reset). Live units: each driver stops once next to a running ingest or
+    lint whose lock was removed by hand, and exits 0, stashes nothing,
+    commits nothing, keeps the flag, notifies, gives the lock back and runs
+    no worker; the running driver finishes its unit and removes the lock.
+    A flag whose pid runs no A5N driver, runs another job's driver, or
+    holds the run's own pid, is stashed as before. Each check was run
+    against a copy with its fix removed, and failed there: the bound; the
+    option reset, the alias, function and `SECONDS` lines, and `-R` itself,
+    each in each driver; the stop in each driver; the live unit check, its
+    own pid rule, its job match, and the lock given back.
 
 Plus the standard checks: `py_compile`, `zsh -n` on every shell file,
 `config.py --check` on the test configs, and config validation cases.
