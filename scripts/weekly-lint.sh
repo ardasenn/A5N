@@ -158,17 +158,14 @@ sync_recover || exit 0
 recover_interrupted_unit || exit 1
 
 # Hand written edits should not be mixed into lint commits.
-if [ -n "$(git status --porcelain)" ]; then
-  log "WARNING: vault dirty before lint, committing manual edits separately"
-  git add -A >> "$LOG" 2>&1
-  git commit -m "chore: manual vault changes (pre-lint $(date +%F))" >> "$LOG" 2>&1
-fi
+commit_manual_changes lint
 
 # With sync: pull, the raw download, then the remote lock. Every lint step
 # edits or reports on pages, so none of it may run next to the other
 # machine's workers. The lint already notifies when the local lock makes it
-# skip, and these skips follow suit.
-sync_begin lint yes yes
+# skip, and these skips follow suit. A vault that changed under the wait
+# for the remote stops the lint untouched, and says so.
+sync_begin lint yes yes || exit 0
 case "$SYNC_STATE" in
   offline)
     notify_fail "lint skipped: $A5N_SYNC_REMOTE unreachable; by hand later: scripts/weekly-lint.sh"

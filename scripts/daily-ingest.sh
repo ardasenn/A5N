@@ -195,16 +195,13 @@ recover_interrupted_unit || exit 1
 
 # Hand written vault edits should not be mixed into ingest commits. Commit
 # them separately under an honest message.
-if [ -n "$(git status --porcelain)" ]; then
-  log "WARNING: vault dirty before ingest, committing manual edits separately"
-  git add -A >> "$LOG" 2>&1
-  git commit -m "chore: manual vault changes (pre-ingest $(date +%F))" >> "$LOG" 2>&1
-fi
+commit_manual_changes ingest
 
 # With sync: pull, download the other machine's raw files, try the remote
 # lock. Capture below runs whatever this finds; it is the only step with a
-# deadline.
-sync_begin ingest yes yes
+# deadline. A vault that changed under the wait for the remote, a rebase by
+# hand or another branch, stops the run untouched.
+sync_begin ingest yes yes || exit 0
 
 # ---- Layer 1: capture (deterministic) --------------------------------------
 log "layer 1: capture started"

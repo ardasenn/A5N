@@ -4,7 +4,8 @@
 # sync behaves exactly as it did before this file existed.
 #
 # Contract with the driver: log() and notify_fail() are defined, VAULT,
-# LOGDIR, LOG and LOCK are set, and the functions run with the vault as the
+# LOGDIR, LOG and LOCK are set, lib/common.sh is sourced (sync_begin commits
+# hand edits through it), and the functions run with the vault as the
 # working directory.
 #
 # Pages travel through a git remote. Raw transcripts travel with them or,
@@ -318,7 +319,6 @@ sync_pushed() {
 # be worse than a skipped day. 0 go on, 1 stop (the user was told).
 sync_recover() {
   sync_on || return 0
-  local op head
   if [ -e "$SYNC_MARKER" ]; then
     if [ "$(sync_in_progress)" = rebase ]; then
       git rebase --abort >> "$LOG" 2>&1
@@ -326,6 +326,14 @@ sync_recover() {
     fi
     rm -f "$SYNC_MARKER"
   fi
+  sync_vault_ok
+}
+
+# The user's side of sync_recover, asked again after the wait for the
+# remote. 0 the vault is on the sync branch with no git operation in
+# progress; 1 not (the user was told).
+sync_vault_ok() {
+  local op head
   op="$(sync_in_progress)"
   if [ -n "$op" ]; then
     notify_fail "the vault has a $op in progress, run skipped; finish or abort it by hand"
@@ -340,11 +348,24 @@ sync_recover() {
 }
 
 # Pull (waiting for a remote that is out of reach, see sync_reach), then the
-# raw download, then one try at the remote lock. Sets SYNC_STATE.
+# raw download, then one try at the remote lock. Sets SYNC_STATE. 0 go on;
+# 1 stop, the vault changed under the wait (the user was told).
 sync_begin() {  # <job> <raw download: yes|no> <remote lock: yes|no>
   sync_on || { SYNC_STATE=off; return 0; }
   SYNC_JOB="$1"
-  if ! sync_reach; then
+  local reached=0
+  sync_reach || reached=1
+  # The driver checked the vault and committed hand edits before the wait,
+  # and the wait can end just as somebody logs in and starts working. Found
+  # in review: a hand edit made git refuse the rebase below, a conflict that
+  # was not there, and layer 2 skipped; a rebase started by hand was aborted
+  # by A5N's own, resolution and all; another branch checked out meanwhile
+  # was rebased, processed and pushed to the sync branch. So once more: a
+  # git operation in progress or another branch stops the run untouched,
+  # and hand edits get a commit of their own.
+  sync_vault_ok || return 1
+  commit_manual_changes "$1"
+  if [ "$reached" -ne 0 ]; then
     SYNC_STATE=offline
     log "WARNING: sync: $A5N_SYNC_REMOTE unreachable, working offline: layer 2 skipped, commits wait for the next run"
     sync_failed "$A5N_SYNC_REMOTE unreachable"

@@ -1117,7 +1117,7 @@ t_wait_lint_digest() {
 # back.
 t_wait_last_try() {
   world waitlast
-  CFG_OFFLINE_AFTER=5 machine_config m1 on yes alpha
+  CFG_OFFLINE_AFTER=8 machine_config m1 on yes alpha
   machine_new m1
   a5n m1 daily-ingest.sh
   session m1 alpha "$A1" 2026-09-01
@@ -1135,26 +1135,34 @@ t_wait_last_try() {
 }
 
 # A remote that stays away for the whole wait: the run ends offline exactly
-# as it did before the wait existed, and the wait has an end.
+# as it did before the wait existed, and the wait has an end. A hand edit
+# made meanwhile gets its own commit instead of riding in the capture's.
 t_wait_offline() {
   world waitoff
-  CFG_OFFLINE_AFTER=5 machine_config m1 on yes alpha
+  CFG_OFFLINE_AFTER=8 machine_config m1 on yes alpha
   machine_new m1
   a5n m1 daily-ingest.sh
   session m1 alpha "$A2" 2026-09-02
   session m1 alpha "$S1" 2026-09-03 small
-  local v="$W/m1/vault" start took
+  local v="$W/m1/vault" start took drv
   rm -f "$v/.a5n-logs/$TODAY.log"
   print -r -- lingering > "$A5N_TEST_LOGIN"
   mv "$W/origin.git" "$W/origin.away"
   forget_calls
   start=$SECONDS
-  A5N_SYNC_RETRY_DELAY=1 a5n m1 daily-ingest.sh
+  A5N_SYNC_RETRY_DELAY=1 a5n m1 daily-ingest.sh &
+  drv=$!
+  wait_for "the run waits for a login" "vlog m1 | grep -q 'waiting for a login'" || return
+  print -r -- "typed by hand while the run waited" >> "$v/index.md"
+  wait "$drv"
   took=$(( SECONDS - start ))
-  has "the run waited for a login first" "$(vlog m1)" "waiting for a login"
   has "then it worked offline" "$(vlog m1)" "unreachable, working offline"
-  check "it waited out offline_after" test "$took" -ge 5
-  check "and not much longer" test "$took" -lt 20
+  check "it waited out offline_after" test "$took" -ge 8
+  check "and not much longer" test "$took" -lt 25
+  # The first run's setup leftovers made a manual changes commit too: the
+  # edit's own commit is the last one that touched index.md.
+  check_eq "the hand edit has a commit of its own" "chore: manual vault changes (pre-ingest $TODAY)" \
+    "$(git -C "$v" log -1 --format=%s -- index.md)"
   check "the raw file was captured" test -f "$v/alpha/raw/sessions/$A2.jsonl"
   has "the capture commit exists locally" "$(git -C "$v" log -1 --format=%s)" "chore: raw capture"
   check_eq "no unit ran offline" 0 "$(pages_for "$v" "$A2")"
@@ -1171,36 +1179,133 @@ t_wait_offline() {
 }
 
 # A machine shut down from the login screen stops a run in the middle of
-# its wait. It must leave the way a run stopped mid unit does.
+# its wait, and the wait now lasts minutes where it lasted seconds. Every
+# job must leave the way a run stopped mid unit does.
 t_wait_stopped() {
   world waitstop
   CFG_OFFLINE_AFTER=60 machine_config m1 on yes alpha
   machine_new m1
   a5n m1 daily-ingest.sh
   session m1 alpha "$A1" 2026-09-01
-  local v="$W/m1/vault" how drv start i
+  local v="$W/m1/vault" script name how drv start i
   print -r -- lingering > "$A5N_TEST_LOGIN"
   mv "$W/origin.git" "$W/origin.away"
-  for how in group-term driver-term; do
-    rm -f "$v/.a5n-logs/$TODAY.log"
-    A5N_CONFIG="$W/m1/config.ini" A5N_SYNC_RETRY_DELAY=1 \
-      setsid zsh "$REPO/scripts/daily-ingest.sh" &
-    drv=$!
-    wait_for "the run waits for a login ($how)" "vlog m1 | grep -q 'waiting for a login'" || return
-    start=$SECONDS
-    case "$how" in
-      group-term) kill -TERM -- "-$drv" ;;
-      driver-term) kill -TERM "$drv" ;;
-    esac 2>/dev/null
-    wait "$drv" 2>/dev/null
-    check "a run stopped while waiting ends at once ($how)" test $(( SECONDS - start )) -lt 10
-    for i in {1..30}; do [ -z "$(session_left "$drv")" ] && break; sleep 0.1; done
-    check_eq "it leaves nothing in its session ($how)" "" "$(session_left "$drv")"
-    check "it removes its local lock ($how)" test ! -e "$v/.a5n-logs/.lock"
-    has_not "it did not go on offline ($how)" "$(vlog m1)" "working offline"
-    check "it captured nothing ($how)" test ! -e "$v/alpha/raw/sessions/$A1.jsonl"
+  for script name in daily-ingest.sh ingest weekly-lint.sh lint digest.sh digest; do
+    for how in group-term driver-term; do
+      rm -f "$v/.a5n-logs/"*"$TODAY.log"(N)
+      A5N_CONFIG="$W/m1/config.ini" A5N_SYNC_RETRY_DELAY=1 \
+        setsid zsh "$REPO/scripts/$script" > /dev/null &
+      drv=$!
+      wait_for "the $name waits for a login ($how)" "vlog m1 $name | grep -q 'waiting for a login'" || return
+      start=$SECONDS
+      case "$how" in
+        group-term) kill -TERM -- "-$drv" ;;
+        driver-term) kill -TERM "$drv" ;;
+      esac 2>/dev/null
+      wait "$drv" 2>/dev/null
+      check "a $name stopped while waiting ends at once ($how)" test $(( SECONDS - start )) -lt 10
+      for i in {1..30}; do [ -z "$(session_left "$drv")" ] && break; sleep 0.1; done
+      check_eq "the $name leaves nothing in its session ($how)" "" "$(session_left "$drv")"
+      check "the $name removes its local lock ($how)" test ! -e "$v/.a5n-logs/.lock"
+      has_not "the $name did not go on offline ($how)" "$(vlog m1 $name)" "working offline"
+    done
   done
+  check "the ingest captured nothing" test ! -e "$v/alpha/raw/sessions/$A1.jsonl"
   mv "$W/origin.away" "$W/origin.git"
+}
+
+# The wait ends when somebody logs in, which is when hand edits start. The
+# checks before the wait are stale by then. An edit made during the wait
+# made git refuse the rebase, and the run reported a conflict that was not
+# there and skipped layer 2.
+t_wait_dirty() {
+  world waitdirty
+  CFG_OFFLINE_AFTER=60 machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" drv
+  rm -f "$v/.a5n-logs/$TODAY.log"
+  print -r -- lingering > "$A5N_TEST_LOGIN"
+  mv "$W/origin.git" "$W/origin.away"
+  forget_calls
+  A5N_SYNC_RETRY_DELAY=1 a5n m1 daily-ingest.sh &
+  drv=$!
+  wait_for "the run waits for a login" "vlog m1 | grep -q 'waiting for a login'" || return
+  print -r -- "typed by hand after the login" >> "$v/index.md"
+  mv "$W/origin.away" "$W/origin.git"
+  print -r -- active > "$A5N_TEST_LOGIN"
+  wait "$drv"
+  check_eq "no notification, no false conflict" "" "$(calls notify)"
+  check_eq "layer 2 ran" 1 "$(pages_for "$v" "$A1")"
+  check_eq "the edit has a commit of its own" "chore: manual vault changes (pre-ingest $TODAY)" \
+    "$(git -C "$v" log -1 --format=%s -- index.md)"
+  has "and it reached the remote" "$(remote_file index.md)" "typed by hand after the login"
+  check_eq "everything is pushed" "$(remote_head)" "$(local_head m1)"
+}
+
+# A rebase started by hand during the wait, the very fix A5N's conflict
+# notification asks for, stops the run untouched. A5N's own rebase used to
+# fail on it and then abort it, the user's resolution with it.
+t_wait_user_rebase() {
+  world waitrebase
+  CFG_OFFLINE_AFTER=60 machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" drv
+  git -C "$v" checkout -q -b side
+  sed -i '3s/.*/side edit/' "$v/index.md"
+  git -C "$v" commit -qam "side"
+  git -C "$v" checkout -q main
+  rm -f "$v/.a5n-logs/$TODAY.log"
+  print -r -- lingering > "$A5N_TEST_LOGIN"
+  mv "$W/origin.git" "$W/origin.away"
+  forget_calls
+  A5N_SYNC_RETRY_DELAY=1 a5n m1 daily-ingest.sh &
+  drv=$!
+  wait_for "the run waits for a login" "vlog m1 | grep -q 'waiting for a login'" || return
+  sed -i '3s/.*/main edit/' "$v/index.md"
+  git -C "$v" commit -qam "main edit by hand"
+  git -C "$v" rebase side > /dev/null 2>&1
+  mv "$W/origin.away" "$W/origin.git"
+  print -r -- active > "$A5N_TEST_LOGIN"
+  wait "$drv"
+  has "the run stopped and said why" "$(calls notify)" "has a rebase in progress, run skipped"
+  check "the user's rebase is untouched" test -d "$v/.git/rebase-merge"
+  check "nothing was captured" test ! -e "$v/alpha/raw/sessions/$A1.jsonl"
+  check "the local lock is gone" test ! -e "$v/.a5n-logs/.lock"
+}
+
+# Another branch checked out during the wait stops the run untouched. A5N
+# used to rebase that branch, run layer 2 on it and push it to the remote's
+# main.
+t_wait_branch() {
+  world waitbranch
+  CFG_OFFLINE_AFTER=60 machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" drv
+  rm -f "$v/.a5n-logs/$TODAY.log"
+  print -r -- lingering > "$A5N_TEST_LOGIN"
+  mv "$W/origin.git" "$W/origin.away"
+  forget_calls
+  A5N_SYNC_RETRY_DELAY=1 a5n m1 daily-ingest.sh &
+  drv=$!
+  wait_for "the run waits for a login" "vlog m1 | grep -q 'waiting for a login'" || return
+  git -C "$v" checkout -q -b drafts
+  print -r -- "a private draft" > "$v/draft.md"
+  git -C "$v" add draft.md
+  git -C "$v" commit -qm "a draft on another branch"
+  mv "$W/origin.away" "$W/origin.git"
+  print -r -- active > "$A5N_TEST_LOGIN"
+  wait "$drv"
+  has "the run stopped and said why" "$(calls notify)" "the vault is on 'drafts', sync expects 'main'"
+  check "the draft did not reach the remote" test -z "$(remote_file draft.md)"
+  check_eq "the run committed nothing on that branch" "a draft on another branch" \
+    "$(git -C "$v" log -1 --format=%s drafts)"
+  check "nothing was captured" test ! -e "$v/alpha/raw/sessions/$A1.jsonl"
 }
 
 # --- runner ------------------------------------------------------------------
