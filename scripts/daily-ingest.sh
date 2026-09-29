@@ -212,7 +212,9 @@ if [ ! -s "$QTSV" ]; then
 fi
 # Workers only run in step with the remote and, with the lock on, while
 # holding it. A lock that arrives after a wait means the other machine may
-# have processed some of these units meanwhile, so the queue is rebuilt.
+# have processed some of these units meanwhile, so the queue is rebuilt. A
+# vault that changed under that wait, a rebase by hand or another branch,
+# stops the run untouched.
 sync_ready_for_workers || exit 0
 if [ "$SYNC_REQUEUE" = 1 ]; then
   build_queue

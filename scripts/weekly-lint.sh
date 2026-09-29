@@ -144,7 +144,8 @@ commit_manual_changes lint
 # edits or reports on pages, so none of it may run next to the other
 # machine's workers. The lint already notifies when the local lock makes it
 # skip, and these skips follow suit. A vault that changed under the wait
-# for the remote stops the lint untouched, and says so.
+# for the remote, or under the wait for its lock, stops the lint untouched,
+# and says so once.
 sync_begin lint yes yes || exit 0
 case "$SYNC_STATE" in
   offline)
@@ -152,10 +153,15 @@ case "$SYNC_STATE" in
     exit 0 ;;
   blocked) exit 0 ;;
 esac
-if ! sync_ready_for_workers; then
-  notify_fail "lint skipped: $SYNC_SKIP_REASON; by hand later: scripts/weekly-lint.sh"
-  exit 0
-fi
+sync_ready_for_workers
+case $? in
+  1)
+    notify_fail "lint skipped: $SYNC_SKIP_REASON; by hand later: scripts/weekly-lint.sh"
+    exit 0 ;;
+  # The vault changed under the wait for the remote lock, and the check that
+  # found it has said why already: a second notification adds nothing.
+  2) exit 0 ;;
+esac
 
 # --- 1+2. Mechanical layer (deterministic) ----------------------------------
 UNIT_BASE="$(git rev-parse HEAD)"

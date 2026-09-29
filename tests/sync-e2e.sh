@@ -1337,6 +1337,117 @@ t_wait_branch() {
   check "nothing was captured" test ! -e "$v/alpha/raw/sessions/$A1.jsonl"
 }
 
+# The wait for the other machine's lock can last an hour, and hand edits
+# happen meanwhile. After it the run asks the start's questions again: an
+# edit made git refuse the rebase, a conflict that was not there, and layer
+# 2 skipped.
+t_lock_wait_dirty() {
+  world lockwaitdirty
+  machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  fake_lock "host=elsewhere pid=1 job=ingest" now
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" drv
+  forget_calls
+  A5N_SYNC_WAIT=30 a5n m1 daily-ingest.sh &
+  drv=$!
+  wait_for "m1 waits for the remote lock" "vlog m1 | grep -q 'waiting for the remote lock'" || return
+  print -r -- "typed by hand during the wait" >> "$v/index.md"
+  git --git-dir="$W/origin.git" update-ref -d refs/a5n/lock
+  wait "$drv"
+  check_eq "no notification, no false conflict" "" "$(calls notify)"
+  check_eq "layer 2 ran" 1 "$(pages_for "$v" "$A1")"
+  # Setup leftovers made a manual changes commit of their own earlier: the
+  # commit that added the typed line is the one to look at.
+  check_eq "the edit has a commit of its own" "chore: manual vault changes (pre-ingest $TODAY)" \
+    "$(git -C "$v" log -1 --format=%s -S 'typed by hand during the wait' -- index.md)"
+  has "and it reached the remote" "$(remote_file index.md)" "typed by hand during the wait"
+  check_eq "everything is pushed" "$(remote_head)" "$(local_head m1)"
+}
+
+# A rebase started by hand during the wait for the remote lock stops the run
+# untouched. A5N's own rebase used to fail on it and then abort it, the
+# user's resolution with it.
+t_lock_wait_user_rebase() {
+  world lockwaitrebase
+  machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  local v="$W/m1/vault" drv
+  git -C "$v" checkout -q -b side
+  sed -i '3s/.*/side edit/' "$v/index.md"
+  git -C "$v" commit -qam "side"
+  git -C "$v" checkout -q main
+  fake_lock "host=elsewhere pid=1 job=ingest" now
+  session m1 alpha "$A1" 2026-09-01
+  forget_calls
+  A5N_SYNC_WAIT=30 a5n m1 daily-ingest.sh &
+  drv=$!
+  wait_for "m1 waits for the remote lock" "vlog m1 | grep -q 'waiting for the remote lock'" || return
+  sed -i '3s/.*/main edit/' "$v/index.md"
+  git -C "$v" commit -qam "main edit by hand"
+  git -C "$v" rebase side > /dev/null 2>&1
+  git --git-dir="$W/origin.git" update-ref -d refs/a5n/lock
+  wait "$drv"
+  has "the run stopped and said why" "$(calls notify)" "has a rebase in progress, run skipped"
+  check "the user's rebase is untouched" test -d "$v/.git/rebase-merge"
+  check_eq "no unit ran" 0 "$(pages_for "$v" "$A1")"
+  check_eq "the remote lock is released" "" "$(remote_lock)"
+}
+
+# Another branch checked out during the wait for the remote lock stops the
+# run untouched. A5N used to rebase that branch, run layer 2 on it and push
+# it to the remote's main.
+t_lock_wait_branch() {
+  world lockwaitbranch
+  machine_config m1 on yes alpha
+  machine_new m1
+  a5n m1 daily-ingest.sh
+  fake_lock "host=elsewhere pid=1 job=ingest" now
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" drv
+  forget_calls
+  A5N_SYNC_WAIT=30 a5n m1 daily-ingest.sh &
+  drv=$!
+  wait_for "m1 waits for the remote lock" "vlog m1 | grep -q 'waiting for the remote lock'" || return
+  git -C "$v" checkout -q -b drafts
+  print -r -- "a private draft" > "$v/draft.md"
+  git -C "$v" add draft.md
+  git -C "$v" commit -qm "a draft on another branch"
+  git --git-dir="$W/origin.git" update-ref -d refs/a5n/lock
+  wait "$drv"
+  has "the run stopped and said why" "$(calls notify)" "the vault is on 'drafts', sync expects 'main'"
+  check "the draft did not reach the remote" test -z "$(remote_file draft.md)"
+  check_eq "the run committed nothing on that branch" "a draft on another branch" \
+    "$(git -C "$v" log -1 --format=%s drafts)"
+  check_eq "no unit ran" 0 "$(pages_for "$v" "$A1")"
+}
+
+# The lint stopped by the vault check after the wait for the remote lock:
+# that check's own notification says why, and no "lint skipped" doubles it.
+t_lint_lock_wait() {
+  world lintlockwait
+  machine_config m1 on yes alpha
+  machine_new m1
+  session m1 alpha "$A1" 2026-09-01
+  a5n m1 daily-ingest.sh
+  fake_lock "host=elsewhere pid=1 job=ingest" now
+  local v="$W/m1/vault" drv
+  forget_calls
+  A5N_SYNC_WAIT=30 a5n m1 weekly-lint.sh &
+  drv=$!
+  wait_for "the lint waits for the remote lock" "vlog m1 lint | grep -q 'waiting for the remote lock'" || return
+  git -C "$v" checkout -q -b drafts
+  git --git-dir="$W/origin.git" update-ref -d refs/a5n/lock
+  wait "$drv"
+  has "the lint stopped and said why" "$(calls notify)" "the vault is on 'drafts', sync expects 'main'"
+  check_eq "one notification, not two" 1 "$(calls notify | wc -l | tr -d ' ')"
+  check_eq "no report reached the remote" "" "$(remote_file alpha/lint-report.md)"
+  check_eq "nothing was committed on that branch" "$(git -C "$v" rev-parse main)" \
+    "$(git -C "$v" rev-parse drafts)"
+}
+
 # Two runs a timer starts at the same boot, an ingest and a lint the machine
 # was off for, start in the same second. One of them used to be skipped
 # until its next slot, a day or a week away, or both passed the lock check

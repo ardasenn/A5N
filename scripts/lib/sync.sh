@@ -4,9 +4,9 @@
 # sync behaves exactly as it did before this file existed.
 #
 # Contract with the driver: log() and notify_fail() are defined, VAULT,
-# LOGDIR, LOG and LOCK are set, lib/common.sh is sourced (sync_begin commits
-# hand edits through it), and the functions run with the vault as the
-# working directory.
+# LOGDIR, LOG and LOCK are set, lib/common.sh is sourced (sync_begin and
+# sync_ready_for_workers commit hand edits through it), and the functions
+# run with the vault as the working directory.
 #
 # Pages travel through a git remote. Raw transcripts travel with them or,
 # when raw/ is kept out of git, through any storage rclone can reach
@@ -407,7 +407,8 @@ sync_publish() {
 }
 
 # Whether layer 2 may start. 0 yes (rebuild the queue first when
-# SYNC_REQUEUE=1); 1 no, the reason in SYNC_SKIP_REASON.
+# SYNC_REQUEUE=1); 1 no, the reason in SYNC_SKIP_REASON; 2 stop, the vault
+# changed under the wait for the remote lock (the user was told).
 sync_ready_for_workers() {
   SYNC_REQUEUE=0
   SYNC_SKIP_REASON=""
@@ -431,6 +432,15 @@ sync_ready_for_workers() {
     waited=$(( waited + SYNC_POLL ))
     touch "$LOCK"
     sync_lock_take || continue
+    # An hour is time enough for somebody to start working in the vault, so
+    # sync_begin's questions once more: a git operation in progress or
+    # another branch stops the run untouched, hand edits get a commit of
+    # their own. Without them, seen in tests/sync-e2e.sh: a hand edit made
+    # git refuse the rebase below, a conflict that was not there; a rebase
+    # started by hand was aborted by A5N's own; another branch was rebased,
+    # processed and pushed to the sync branch.
+    sync_vault_ok || return 2
+    commit_manual_changes "$SYNC_JOB"
     # The other machine may have processed units while this one waited.
     if ! sync_fetch; then
       SYNC_STATE=offline
