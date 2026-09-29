@@ -313,10 +313,12 @@ ve sayfa yazar.
   kapalıyken kaçırılan bütün koşuları açılışta birlikte başlatır ve atlanan
   bir lint ya da digest bir sonraki zamanını, bir hafta ya da bir ay,
   beklerdi.
-- Sahibi ölmüş ya da iki saatten eski kilit ölü sayılır, çünkü çöken bir
-  süreç temizlik trap'ini çalıştıramaz ve ölü kilit sonraki tüm koşuları
-  sessizce yutar. Böyle bir kilidi bekleyen görevlerden yalnızca biri
-  devralabilir.
+- Sahibi ölmüş kilit ölü sayılır, çünkü çöken bir süreç temizlik trap'ini
+  çalıştıramaz ve ölü kilit sonraki tüm koşuları sessizce yutar. Böyle bir
+  kilidi bekleyen görevlerden yalnızca biri devralabilir. Hâlâ çalışan bir
+  görev, ne kadar sürerse sürsün, uyku modunda bile kilidini korur: iki
+  saat dokunulmayan bir kilit ancak süreç numarası artık başka bir programa
+  aitse serbest kalır.
 - Sync açıkken kilidin ikinci bir yarısı olur: git remote'unda, model
   işçileri koşarken aynı anda sadece bir makinenin tutabildiği bir ref. Her
   oturumdan sonra tazelenir, dolayısıyla uzun bir koşu asla terk edilmiş

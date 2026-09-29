@@ -308,10 +308,12 @@ writes pages.
   to two hours, instead of skipping: the scheduler starts every run the
   machine was off for together at boot, and a skipped lint or digest would
   wait a week or a month for its next slot.
-- A lock whose owner is gone, or older than two hours, is treated as dead,
-  because a crash cannot run the cleanup trap and a stale lock would
-  silently swallow every later run. Only one waiting job can take such a
-  lock over.
+- A lock whose owner is gone is treated as dead, because a crash cannot run
+  the cleanup trap and a stale lock would silently swallow every later run.
+  Only one waiting job can take such a lock over. A job that is still
+  running keeps its lock however long it takes, across a suspend too: two
+  hours without a touch free a lock only when its process number now
+  belongs to another program.
 - With sync on, the lock has a second half: a ref on the git remote that
   only one machine at a time can hold while model workers run. It is
   refreshed after every session, so a long run never looks abandoned.
