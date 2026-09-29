@@ -6,7 +6,8 @@ for a remote it cannot reach at its start (decision 2, "Waiting for the
 remote"). Revised again the same day, in a separate change: a job waits for
 the local lock instead of skipping, the lock is taken in one step, and the
 vault is checked again after the wait for the remote lock ("The local
-lock").
+lock"). A third change the same day hardened the lock after its second
+review: items 9 to 11 of "The local lock".
 
 ## Problem
 
@@ -242,8 +243,9 @@ two runs starting in the same instant could both pass the look.
    the running unit's half page with a "killed run" notification, and ran
    next to it. The user chose this rule knowing its cost: a driver that
    truly hangs keeps the lock, and the jobs behind it wait and skip (lint
-   and digest with a notification). Every network call is bounded and the
-   workers have a watchdog, so a hang is not expected.
+   and digest with a notification). Every network call and the desktop
+   notification are bounded (item 10) and the workers have a watchdog, so a
+   hang is not expected.
 5. Removing a lock is a look and then a remove, and two waiters that
    looked at a stale lock in the same instant both removed it: the second
    removed the lock the first had just written, and both ran. Every remove
@@ -272,6 +274,33 @@ two runs starting in the same instant could both pass the look.
    the skip, the lint and the digest notify. A run started by hand on a
    terminal prints one line to stderr when it starts to wait and one when
    it gives up; Ctrl-C stops it.
+
+Three hardening changes followed the second review, the same day:
+
+9. The drivers reset every zsh option (`emulate -R zsh`) before their first
+   command. zsh runs the user's `.zshenv` before any script, and an option
+   set there reached the lock code. With `KSH_GLOB` the running driver
+   check matched no command line, so a waiting job took a live run's lock
+   once it was two hours old. With `SH_GLOB` `lib/common.sh` and
+   `lib/sync.sh` did not parse: no lock function existed, and on a scratch
+   vault every ingest logged a lock that nobody held and skipped, the lint
+   and the digest with a notification that gave the same wrong reason.
+   `emulate -L zsh` inside the lock functions cannot help there, since the
+   parse fails before any function runs. Plain `emulate zsh` resets only
+   the options emulation cares about and leaves `FORCE_FLOAT`, which made
+   the lock's age a float and its comparison an error, and `CLOBBER_EMPTY`
+   (item 7); `-R` resets them all. Variables, `PATH` among them, stay as
+   the `.zshenv` set them. The create keeps its own `CLOBBER_EMPTY` line
+   for a caller that sources the library on its own, as the tests do. The
+   cost: `zsh -x` traces a driver up to that line only.
+10. The macOS notification gets the bound notify-send has on Linux, ten
+    seconds, through the watchdog the network commands use. That watchdog,
+    `a5n_bounded`, moved from `lib/sync.sh` to `lib/common.sh`, which
+    `lib/sync.sh` requires already. No hang of osascript was ever seen, but
+    it was the one call a macOS run made with no bound, and a run that
+    hangs keeps its lock for good (item 4).
+11. A job that finds the unit flag of a driver that still runs stops
+    instead of stashing the unit; see "Interrupted units".
 
 The wait for the remote lock (ingest step 6) got the same second look at
 the vault that the wait for the remote got: after the lock is taken and
@@ -400,17 +429,19 @@ timestamp.
   conflict, or a push that ended offline, rejected or in conflict.
 * Immediate notifications: blocked runs, raw copy failures, a lost lock, a
   remote that refuses the lock ref, an interrupted unit moved to the stash,
-  lint or digest skipped.
+  a unit whose driver still runs, lint or digest skipped.
 * Timeouts: every git network command is bounded to 120 seconds and every
   rclone call to 1 hour, with the same watchdog pattern the unit worker
   uses (macOS has no `timeout(1)`). Without a bound, one hung push would hold
   the local lock forever and every later run would skip in silence.
   `GIT_TERMINAL_PROMPT=0` makes a missing credential fail instead of waiting
-  for input.
+  for input. The desktop notification gets 10 seconds on both systems:
+  notify-send through `timeout(1)`, osascript through the same watchdog.
 * Test knobs, environment only: `A5N_SYNC_WAIT` (3600), `A5N_SYNC_POLL`
   (300), `A5N_SYNC_RETRY_DELAY` (20, also the pace of the wait for the
-  remote), and for the local lock (`lib/common.sh`) `A5N_LOCK_WAIT` (7200)
-  and `A5N_LOCK_POLL` (10).
+  remote), for the local lock (`lib/common.sh`) `A5N_LOCK_WAIT` (7200)
+  and `A5N_LOCK_POLL` (10), and `A5N_OSASCRIPT` (`/usr/bin/osascript`),
+  which no PATH shim can stand in for.
 
 ## Interrupted units, with sync on or off
 
@@ -427,6 +458,21 @@ sync on, would push them to the other machine).
   notification that says how to look (`git stash list`); flag present and
   tree clean: a log line. The flag is then removed. If the stash fails the
   run notifies and exits: those changes are never committed as manual edits.
+* Added with the lock hardening (2026-09-29): before any of that, the pid in
+  the flag is checked. When `ps` shows an A5N driver with that pid, and it
+  is not this run's own, the unit is still running: its driver lost the
+  lock, removed by hand, or taken from a driver another user runs, whose pid
+  `kill -0` cannot signal and the lock rule counts as dead (`ps` still sees
+  it). The stash took the half page from under that unit, and this run
+  worked next to it. Now the run leaves the tree and the flag alone, writes
+  that pid into the lock under the guard, so the driver's touches and its
+  exit find the lock again and later jobs wait for it, notifies ("A5N run
+  pid N is still inside a unit (ingest alpha/1a2b3c4d) after losing its
+  lock; this run stopped without touching the vault and gave the lock
+  back") and exits 0, the way a skipped run does. Ingest, lint and digest
+  behave alike. A flag whose pid is dead, is this run's own (an earlier
+  process had it) or runs no A5N driver (reused) is a killed run's unit, as
+  before.
 
 ## setup.sh
 
@@ -565,6 +611,27 @@ Scenarios:
     removed one as an empty file; without the guard a stale lock is still
     taken over, with a warning. Each of these was also checked against a
     copy with its fix removed.
+16. Added with the lock hardening (2026-09-29), sync off. The suite unsets
+    `ZDOTDIR`, so no `.zshenv` but a scenario's own reaches a driver.
+    macOS: `uname` answers `Darwin` for one scenario and `A5N_OSASCRIPT`
+    points at a fake that hangs and ignores TERM; the ingest that notifies
+    ends within 20 seconds (10, then 5 of grace), the fake is killed, and
+    the lock is gone. zsh options: with a `.zshenv` of the scenario's own
+    that sets `KSH_GLOB`, then `SH_GLOB`, the drivers parse, and a lint
+    waits for a live process whose command line names a driver although
+    its lock is three hours old, and leaves that lock alone; ingests with
+    `KSH_GLOB`, `SH_GLOB` or `FORCE_FLOAT` set take over a lock three hours
+    old whose pid is no A5N run and process their sessions, and a digest
+    with `SH_GLOB` set is written (`SH_GLOB` alone: with `KSH_GLOB` next to
+    it those patterns parse again, and the check missed the digest's
+    reset). A running ingest whose lock was removed by hand: a lint started
+    next to it exits 0, stashes nothing, keeps the flag, notifies, gives the
+    lock back and runs no worker, and the ingest finishes its unit and
+    removes the lock. A flag whose pid runs no A5N driver, or holds the
+    run's own pid, is stashed as before. Each check was run against a copy
+    with its fix removed, and failed there: the bound, the reset in each
+    driver, `-R` itself, the live unit check, its own pid and A5N rules, and
+    the lock given back.
 
 Plus the standard checks: `py_compile`, `zsh -n` on every shell file,
 `config.py --check` on the test configs, and config validation cases.
@@ -615,11 +682,16 @@ this repository, like any other vault data.
   machine that runs only the ingest (a second machine with lint and digest
   off) nothing says so. The scheduler never starts a second instance of a
   job that still runs, so a stuck ingest held the next ones back before
-  this change too. Every network call is bounded and the workers have a
-  watchdog; the macOS notification (osascript) has no bound, and no hang
-  of it is known. The check reads the driver's name from its command line,
-  so a driver started under another name (a symlink) falls back to the two
-  hour rule.
+  this change too. Every network call and the desktop notification are
+  bounded and the workers have a watchdog. The check reads the driver's
+  name from its command line, so a driver started under another name (a
+  symlink) falls back to the two hour rule, and a job that then takes its
+  lock does not recognize its running unit either: the unit goes to the
+  stash as a killed run's.
+* A driver another user runs (sudo) looks dead to the lock rule, whose
+  `kill -0` cannot signal it. A job that takes its lock inside one of its
+  units stops and gives the lock back; one that takes it between two units
+  runs next to it.
 * Two machines scheduled at the same minute make one of them wait. Runs of
   34 to 83 minutes were observed on a real vault, so the waiting machine can
   miss its layer 2 for the day. Stagger the schedules.

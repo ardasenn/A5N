@@ -319,7 +319,9 @@ writes pages.
   refreshed after every session, so a long run never looks abandoned.
 - A run killed in the middle of a session leaves a marker behind. The next
   run moves the half written pages to `git stash` instead of committing
-  them as if you had written them.
+  them as if you had written them. If the run that wrote them is still
+  going, its lock removed by hand say, the next run leaves them alone,
+  gives the lock back to it and tells you.
 - A watchdog kills a worker that exceeds its per unit wall clock. Not a work
   limit, only a guard against hanging forever.
 - Skipping is never silent. When a session is dropped for being too small or

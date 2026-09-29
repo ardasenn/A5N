@@ -325,7 +325,9 @@ ve sayfa yazar.
   görünmez.
 - Bir oturumun ortasında öldürülen koşu arkasında bir işaret bırakır.
   Sonraki koşu yarım yazılmış sayfaları, sen yazmışsın gibi commit'lemek
-  yerine `git stash`'e kaldırır.
+  yerine `git stash`'e kaldırır. O sayfaları yazan koşu hâlâ çalışıyorsa,
+  örneğin kilidi elle silinmişse, sonraki koşu sayfalara dokunmaz, kilidi
+  ona geri verir ve sana haber verir.
 - Watchdog, birim başına duvar saatini aşan işçiyi keser. Bu bir iş sınırı
   değil, sadece sonsuza asılmaya karşı bir koruma.
 - Atlama asla sessiz olmaz. Küçük ya da kopya olduğu için elenen her oturum
