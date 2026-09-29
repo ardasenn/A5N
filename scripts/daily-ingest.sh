@@ -37,7 +37,8 @@
 # ways, pushes after every commit and holds a lock ref on the remote while
 # workers run; scripts/lib/sync.sh has the details and the reasons.
 # A5N_SYNC_WAIT / A5N_SYNC_POLL / A5N_SYNC_RETRY_DELAY shorten its waits in
-# tests.
+# tests, and A5N_LOCK_WAIT / A5N_LOCK_POLL the wait for the local lock
+# (scripts/lib/common.sh).
 set -u
 
 SCRIPT_DIR="${0:A:h}"
@@ -124,43 +125,11 @@ if [ ! -d "$VAULT/.git" ]; then
   exit 1
 fi
 
-# A stale lock swallows every later run in silence. Two staleness signals,
-# either one clears it: the owner pid written inside the lock (a killed
-# driver cannot run its exit trap, but its pid dies with it — seen live
-# when a launchctl bootout mid-run left a freshly touched lock that
-# blocked runs for two hours), and the mtime age rule as fallback for pid
-# reuse and for locks written by older versions that kept the file empty.
-# In a healthy run the lock is refreshed after every unit and can never
-# age past the threshold while alive.
-if [ -e "$LOCK" ]; then
-  LOCK_PID="$(cat "$LOCK" 2>/dev/null)"
-  # GNU stat -f means "filesystem status", not mtime, and prints that block to
-  # stdout even while it exits nonzero — so the BSD-first order fed filesystem
-  # text to the arithmetic below and killed every run (Linux, 2026-08-23..25:
-  # three silent ingest failures behind one stale lock). GNU first, BSD second,
-  # and a digit guard so no platform can poison the math again. An unreadable
-  # mtime counts as fresh: clearing a live owner is worse than one skipped run,
-  # and the pid check above is what actually clears a dead owner.
-  LOCK_MTIME="$(stat -c %Y "$LOCK" 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null)"
-  [[ "$LOCK_MTIME" == <-> ]] || LOCK_MTIME="$(date +%s)"
-  LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
-  if [[ "$LOCK_PID" == <-> ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
-    log "WARNING: stale lock found (owner pid $LOCK_PID is dead), removing and continuing"
-    rm -f "$LOCK"
-  elif [ "$LOCK_AGE" -gt 7200 ]; then
-    log "WARNING: stale lock found (${LOCK_AGE}s, previous run crashed), removing and continuing"
-    rm -f "$LOCK"
-  else
-    log "lock held by pid ${LOCK_PID:-?} (${LOCK_AGE}s), run skipped"
-    exit 0
-  fi
-fi
-
 # If the script dies early the watchdog subshell must not outlive it, or it
 # would later try to kill a pid that no longer belongs to us.
 cleanup() {
   sync_lock_release
-  rm -f "$LOCK"
+  lock_release
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
   return 0
 }
@@ -177,7 +146,14 @@ stop_worker() { [ -n "${AGENT_PID:-}" ] && kill -TERM "$AGENT_PID" 2>/dev/null; 
 trap 'stop_worker; exit 143' TERM
 trap 'stop_worker; exit 130' INT
 trap 'stop_worker; exit 129' HUP
-print -r -- $$ > "$LOCK"
+
+# The lock the three jobs share; lib/common.sh has its rules and the reason
+# for the wait. When the wait runs out the day is skipped as it always was,
+# in the log only: the next ingest comes tomorrow.
+if ! lock_wait ingest; then
+  log "lock held by pid ${LOCK_PID:-?} (${LOCK_AGE}s) after a ${LOCK_WAIT}s wait, run skipped"
+  exit 0
+fi
 
 cd "$VAULT" || exit 1
 
@@ -237,7 +213,9 @@ if [ ! -s "$QTSV" ]; then
 fi
 # Workers only run in step with the remote and, with the lock on, while
 # holding it. A lock that arrives after a wait means the other machine may
-# have processed some of these units meanwhile, so the queue is rebuilt.
+# have processed some of these units meanwhile, so the queue is rebuilt. A
+# vault that changed under that wait, a rebase by hand or another branch,
+# stops the run untouched.
 sync_ready_for_workers || exit 0
 if [ "$SYNC_REQUEUE" = 1 ]; then
   build_queue
@@ -370,7 +348,7 @@ leave no out of schema path. Every other rule still applies."
     fi
   fi
   [ "$PUSH_RC" -eq 1 ] && break
-  touch "$LOCK"
+  lock_touch
   # The remote lock's twin of the touch above. A lock lost to another
   # machine stops layer 2.
   sync_lock_refresh || break

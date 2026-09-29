@@ -4,9 +4,9 @@
 # sync behaves exactly as it did before this file existed.
 #
 # Contract with the driver: log() and notify_fail() are defined, VAULT,
-# LOGDIR, LOG and LOCK are set, lib/common.sh is sourced (sync_begin commits
-# hand edits through it), and the functions run with the vault as the
-# working directory.
+# LOGDIR, LOG and LOCK are set, lib/common.sh is sourced (sync_begin and
+# sync_ready_for_workers commit hand edits through it), and the functions
+# run with the vault as the working directory.
 #
 # Pages travel through a git remote. Raw transcripts travel with them or,
 # when raw/ is kept out of git, through any storage rclone can reach
@@ -45,7 +45,7 @@ SYNC_SEEN_REF="refs/a5n/seen-lock"
 SYNC_WAIT="${A5N_SYNC_WAIT:-3600}"
 SYNC_POLL="${A5N_SYNC_POLL:-300}"
 SYNC_RETRY_DELAY="${A5N_SYNC_RETRY_DELAY:-20}"
-SYNC_STALE=7200               # the local lock's staleness rule, on purpose
+SYNC_STALE=7200               # the same two hours as the local lock's rule
 SYNC_GIT_TIMEOUT=120
 SYNC_RCLONE_TIMEOUT=3600
 
@@ -225,7 +225,7 @@ sync_reach() {
   sync_fetch && return 0
   while [ $(( SECONDS - start )) -lt "$A5N_SYNC_OFFLINE_AFTER" ]; do
     sleep "$SYNC_RETRY_DELAY"
-    touch "$LOCK"
+    lock_touch
     if [ $(( SECONDS - start )) -lt "$A5N_SYNC_OFFLINE_AFTER" ] && sync_no_login; then
       [ "$said" = login ] || log "sync: $A5N_SYNC_REMOTE unreachable and nobody has logged in yet, waiting for a login (at most ${A5N_SYNC_OFFLINE_AFTER}s)"
       said=login
@@ -329,19 +329,20 @@ sync_recover() {
   sync_vault_ok
 }
 
-# The user's side of sync_recover, asked again after the wait for the
-# remote. 0 the vault is on the sync branch with no git operation in
-# progress; 1 not (the user was told).
-sync_vault_ok() {
-  local op head
+# The user's side of sync_recover, asked again after the waits for the
+# remote and for its lock. 0 the vault is on the sync branch with no git
+# operation in progress; 1 not (the user was told what the stop skips, the
+# whole run unless the caller says otherwise).
+sync_vault_ok() {  # [what the stop skips]
+  local op head skipped="${1:-run}"
   op="$(sync_in_progress)"
   if [ -n "$op" ]; then
-    notify_fail "the vault has a $op in progress, run skipped; finish or abort it by hand"
+    notify_fail "the vault has a $op in progress, $skipped skipped; finish or abort it by hand"
     return 1
   fi
   head="$(git symbolic-ref -q --short HEAD)"
   if [ "$head" != "$A5N_SYNC_BRANCH" ]; then
-    notify_fail "the vault is on '${head:-a detached HEAD}', sync expects '$A5N_SYNC_BRANCH', run skipped"
+    notify_fail "the vault is on '${head:-a detached HEAD}', sync expects '$A5N_SYNC_BRANCH', $skipped skipped"
     return 1
   fi
   return 0
@@ -407,7 +408,8 @@ sync_publish() {
 }
 
 # Whether layer 2 may start. 0 yes (rebuild the queue first when
-# SYNC_REQUEUE=1); 1 no, the reason in SYNC_SKIP_REASON.
+# SYNC_REQUEUE=1); 1 no, the reason in SYNC_SKIP_REASON; 2 stop, the vault
+# changed under the wait for the remote lock (the user was told).
 sync_ready_for_workers() {
   SYNC_REQUEUE=0
   SYNC_SKIP_REASON=""
@@ -424,13 +426,25 @@ sync_ready_for_workers() {
   esac
   [ "$A5N_SYNC_LOCK" = yes ] || return 0
   [ -n "$SYNC_HAVE_LOCK" ] && return 0
-  local waited=0
+  local waited=0 skipped=run
+  # The ingest has captured and pushed by now: a stop skips its workers only.
+  [ "$SYNC_JOB" = ingest ] && skipped="layer 2"
   while [ -z "$SYNC_LOCK_REFUSED" ] && [ "$waited" -lt "$SYNC_WAIT" ]; do
     [ "$waited" -eq 0 ] && log "sync: waiting for the remote lock (every ${SYNC_POLL}s, at most ${SYNC_WAIT}s): $SYNC_LOCK_HOLDER"
     sleep "$SYNC_POLL"
     waited=$(( waited + SYNC_POLL ))
-    touch "$LOCK"
+    lock_touch
     sync_lock_take || continue
+    # An hour is time enough for somebody to start working in the vault, so
+    # sync_begin's questions once more: a git operation in progress or
+    # another branch stops the run untouched, hand edits get a commit of
+    # their own. Without them, seen in tests/sync-e2e.sh: a hand edit made
+    # git refuse the rebase below, a conflict that was not there; a rebase
+    # started by hand was aborted by A5N's own; another branch was rebased,
+    # processed and pushed to the sync branch. The hand edits go out with
+    # the next push: the first unit's, or the next run's.
+    sync_vault_ok "$skipped" || return 2
+    commit_manual_changes "$SYNC_JOB"
     # The other machine may have processed units while this one waited.
     if ! sync_fetch; then
       SYNC_STATE=offline
@@ -546,9 +560,11 @@ sync_lock_take() {
     [[ "$ct" == <-> ]] || ct="$(date +%s)"
     age=$(( $(date +%s) - ct ))
     SYNC_LOCK_HOLDER="$subject, ${age}s old"
-    # Stale: older than the local lock's two hours, or this host's own lock
-    # whose pid is gone (the local lock's dead owner rule, so a crash here
-    # does not make this machine's next run wait two hours).
+    # Stale: older than two hours, or this host's own lock whose pid is gone
+    # (the local lock's dead owner rule, so a crash here does not make this
+    # machine's next run wait two hours). Unlike the local lock, two hours
+    # free it even while its owner runs: one machine cannot see the other's
+    # processes, and an owner that lost it stops after its current unit.
     if [ "$age" -gt "$SYNC_STALE" ] || \
        { [ "$host" = "${HOST:-$(hostname)}" ] && [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; }; then
       if sync_lock_push "$cur" "$new"; then

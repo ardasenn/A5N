@@ -17,7 +17,8 @@
 #         project is committed immediately.
 #
 # The lint shares ONE lock file with the ingest, so they can never overlap.
-# If the ingest is still running, the lint notifies and leaves.
+# If the ingest is still running, the lint waits for it (lib/common.sh);
+# only a wait that runs out makes it notify and leave.
 #
 # Testing: point A5N_CONFIG at a scratch config, and use A5N_LINT_PROJECTS
 # ("acme-shop other" narrows the project list) / A5N_UNIT_TIMEOUT /
@@ -99,37 +100,9 @@ if [ ! -d "$VAULT/.git" ]; then
   exit 1
 fi
 
-# The lock is SHARED with daily-ingest. Staleness has two signals: a dead
-# owner pid inside the lock (a killed driver cannot run its exit trap),
-# or an mtime older than two hours — a healthy run refreshes the lock
-# after every unit, so a live lock can never age that much. An empty pid
-# means an older lock format; the age rule covers it.
-if [ -e "$LOCK" ]; then
-  LOCK_PID="$(cat "$LOCK" 2>/dev/null)"
-  # GNU stat -f means "filesystem status", not mtime, and prints that block to
-  # stdout even while it exits nonzero — so the BSD-first order fed filesystem
-  # text to the arithmetic below and killed every run (Linux, 2026-08-23..25:
-  # three silent ingest failures behind one stale lock). GNU first, BSD second,
-  # and a digit guard so no platform can poison the math again. An unreadable
-  # mtime counts as fresh: clearing a live owner is worse than one skipped run,
-  # and the pid check above is what actually clears a dead owner.
-  LOCK_MTIME="$(stat -c %Y "$LOCK" 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null)"
-  [[ "$LOCK_MTIME" == <-> ]] || LOCK_MTIME="$(date +%s)"
-  LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
-  if [[ "$LOCK_PID" == <-> ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
-    log "WARNING: stale lock (owner pid $LOCK_PID is dead), removing and continuing"
-    rm -f "$LOCK"
-  elif [ "$LOCK_AGE" -gt 7200 ]; then
-    log "WARNING: stale lock (${LOCK_AGE}s), removing and continuing"
-    rm -f "$LOCK"
-  else
-    notify_fail "lock held by pid ${LOCK_PID:-?} (${LOCK_AGE}s, probably the ingest is running), lint skipped; by hand: scripts/weekly-lint.sh"
-    exit 0
-  fi
-fi
 cleanup() {
   sync_lock_release
-  rm -f "$LOCK"
+  lock_release
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
   return 0
 }
@@ -141,7 +114,14 @@ stop_worker() { [ -n "${AGENT_PID:-}" ] && kill -TERM "$AGENT_PID" 2>/dev/null; 
 trap 'stop_worker; exit 143' TERM
 trap 'stop_worker; exit 130' INT
 trap 'stop_worker; exit 129' HUP
-print -r -- $$ > "$LOCK"
+
+# The lock is SHARED with daily-ingest; lib/common.sh has its rules and the
+# reason for the wait. A lint that still cannot run after the wait says so:
+# its next slot is a week away.
+if ! lock_wait lint; then
+  notify_fail "lock held by pid ${LOCK_PID:-?} (${LOCK_AGE}s) after a ${LOCK_WAIT}s wait, probably a long ingest, lint skipped; by hand: scripts/weekly-lint.sh"
+  exit 0
+fi
 
 cd "$VAULT" || exit 1
 
@@ -164,7 +144,8 @@ commit_manual_changes lint
 # edits or reports on pages, so none of it may run next to the other
 # machine's workers. The lint already notifies when the local lock makes it
 # skip, and these skips follow suit. A vault that changed under the wait
-# for the remote stops the lint untouched, and says so.
+# for the remote, or under the wait for its lock, stops the lint untouched,
+# and says so once.
 sync_begin lint yes yes || exit 0
 case "$SYNC_STATE" in
   offline)
@@ -172,10 +153,15 @@ case "$SYNC_STATE" in
     exit 0 ;;
   blocked) exit 0 ;;
 esac
-if ! sync_ready_for_workers; then
-  notify_fail "lint skipped: $SYNC_SKIP_REASON; by hand later: scripts/weekly-lint.sh"
-  exit 0
-fi
+sync_ready_for_workers
+case $? in
+  1)
+    notify_fail "lint skipped: $SYNC_SKIP_REASON; by hand later: scripts/weekly-lint.sh"
+    exit 0 ;;
+  # The vault changed under the wait for the remote lock, and the check that
+  # found it has said why already: a second notification adds nothing.
+  2) exit 0 ;;
+esac
 
 # --- 1+2. Mechanical layer (deterministic) ----------------------------------
 UNIT_BASE="$(git rev-parse HEAD)"
@@ -338,7 +324,7 @@ report file must have been written."
     fi
   fi
   [ "$PUSH_RC" -eq 1 ] && break
-  touch "$LOCK"
+  lock_touch
   sync_lock_refresh || break
 done
 

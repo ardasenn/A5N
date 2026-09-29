@@ -12,7 +12,7 @@ scripts/config.py    the only place that reads config.ini
 scripts/*.sh         the unattended run drivers (deterministic orchestration)
 scripts/ingest-*.py  discovery and capture, queue, artifact verification
 scripts/*.py         transcript handling and mechanical lint
-scripts/lib/         functions the drivers source: sync, notification, unit flag
+scripts/lib/         functions the drivers source: sync, local lock, notification, unit flag
 scripts/prompts/     what one headless worker is told, English only
 tests/               end to end tests, scratch directories only
 template/            copied into a new vault by setup.sh
