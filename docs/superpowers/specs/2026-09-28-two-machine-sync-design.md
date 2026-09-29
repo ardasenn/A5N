@@ -294,11 +294,15 @@ Three hardening changes followed the second review, the same day:
    after: an alias or a function named `ps` fed the running driver check
    nothing, just like `KSH_GLOB` (`unalias -m '*'`, `unfunction -m '*'`),
    and a float `SECONDS` (`typeset -F`) made the wait's arithmetic a float
-   and ended the wait at its first look (`typeset -i SECONDS`). Variables,
+   and ended the wait at its first look (`typeset -i SECONDS`). Codex found
+   one more on the pull request: an alias or a function named `emulate`,
+   `unalias` or `unfunction` ran in place of the reset itself, and a no-op
+   `emulate` left `SH_GLOB` set. The four lines run through `\builtin`,
+   which skips aliases and functions of the command's name. Variables,
    `PATH` among them, stay as the `.zshenv` set them. The create keeps its
    own `CLOBBER_EMPTY` line for a caller that sources the library on its
-   own, as the tests do. The cost: `zsh -x` traces a driver up to that
-   line only.
+   own, as the tests do. The cost: `zsh -x` traces a driver up to those
+   lines only.
 10. The macOS notification gets the bound notify-send has on Linux, ten
     seconds, through the watchdog the network commands use. That watchdog,
     `a5n_bounded`, moved from `lib/sync.sh` to `lib/common.sh`, which
@@ -484,7 +488,14 @@ sync on, would push them to the other machine).
   a unit leaves its flag, the catch-up runs after the reboot start
   together and can get the last boot's pids, and a killed ingest's flag
   naming the pid of the lint now waiting for the lock stopped the ingest
-  with a false notification and lost its day.
+  with a false notification and lost its day. And the check comes first
+  since Codex's review of the pull request: each driver asks right after
+  it takes the lock (`unit_driver_runs`), before its own checks, the
+  prompt file, the vault folder and, with sync on, the vault's branch and
+  any git operation in progress. When one of those ended the run first,
+  the exit removed the lock where it had to go back, and the notification
+  named the prompt, not the unit. The recovery asks again, since a driver
+  without its lock can start its next unit after the first look.
 
 ## setup.sh
 
@@ -630,9 +641,11 @@ Scenarios:
     ends within 20 seconds (10, then 5 of grace), the fake is killed, and
     the lock is gone. The `.zshenv`: with one of the scenario's own that
     sets `KSH_GLOB`, `SH_GLOB` or `FORCE_FLOAT`, an alias or a function
-    named `ps`, or a float `SECONDS`, every driver parses, waits the whole
-    wait for a live process whose command line names a driver although its
-    lock is three hours old, and leaves that lock alone; ingests with
+    named `ps`, a float `SECONDS`, or `SH_GLOB` with an alias or a function
+    standing in for `emulate`, `unalias` or `unfunction`, every driver
+    parses, waits the whole wait for a live process whose command line
+    names a driver although its lock is three hours old, and leaves that
+    lock alone; ingests with
     `KSH_GLOB`, `SH_GLOB` or `FORCE_FLOAT` set take over a lock three hours
     old whose pid is no A5N run and process their sessions, and a digest
     with `SH_GLOB` set is written (`SH_GLOB` alone: with `KSH_GLOB` next to
@@ -641,12 +654,17 @@ Scenarios:
     lint whose lock was removed by hand, and exits 0, stashes nothing,
     commits nothing, keeps the flag, notifies, gives the lock back and runs
     no worker; the running driver finishes its unit and removes the lock.
-    A flag whose pid runs no A5N driver, runs another job's driver, or
-    holds the run's own pid, is stashed as before. Each check was run
-    against a copy with its fix removed, and failed there: the bound; the
-    option reset, the alias, function and `SECONDS` lines, and `-R` itself,
-    each in each driver; the stop in each driver; the live unit check, its
-    own pid rule, its job match, and the lock given back.
+    An ingest and a lint with no prompt, and a digest on another branch
+    with sync on, each next to a process that plays the unit's driver, give
+    it the lock before that check ends them; the recovery, called directly
+    with a running unit, leaves it alone too. A flag whose pid runs no A5N
+    driver, runs another job's driver, or holds the run's own pid, is
+    stashed as before. Each check was run against a copy with its fix
+    removed, and failed there: the bound; the option reset, the alias,
+    function and `SECONDS` lines, `-R` itself and each `\builtin`, in each
+    driver; the stop and the early check in each driver; the live unit
+    check, its second look in the recovery, its own pid rule, its job
+    match, and the lock given back.
 
 Plus the standard checks: `py_compile`, `zsh -n` on every shell file,
 `config.py --check` on the test configs, and config validation cases.
@@ -707,6 +725,10 @@ this repository, like any other vault data.
   `kill -0` cannot signal it. A job that takes its lock inside one of its
   units stops and gives the lock back; one that takes it between two units
   runs next to it.
+* A `.zshenv` runs any code it likes before a driver starts. The drivers
+  reset what one sets by accident (options, aliases, functions, a float
+  `SECONDS`), through `\builtin`; a function named `builtin`, or a global
+  alias, still gets past that reset.
 * Two machines scheduled at the same minute make one of them wait. Runs of
   34 to 83 minutes were observed on a real vault, so the waiting machine can
   miss its layer 2 for the day. Stagger the schedules.
