@@ -137,9 +137,14 @@ fi
 # Before anything writes: with sync, A5N's own interrupted rebase is undone
 # and a user's unfinished git operation or another branch stops the run;
 # then a unit a killed run left half written goes to the stash, so the
-# commit below cannot sweep it in as manual edits.
+# commit below cannot sweep it in as manual edits. A unit whose driver still
+# runs stops this run instead, the way a lock held too long skips it.
 sync_recover || exit 0
-recover_interrupted_unit || exit 1
+recover_interrupted_unit
+case $? in
+  1) exit 1 ;;
+  2) exit 0 ;;
+esac
 
 # Hand written edits should not be mixed into lint commits.
 commit_manual_changes lint

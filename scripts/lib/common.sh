@@ -82,11 +82,28 @@ unit_end() {
 # pages, and that commit used to sweep them into history as if a person had
 # written them; with sync on it would push them to the other machine too.
 # They go to a stash rather than away: the user may have edited the vault by
-# hand since the crash, and those edits must survive. 0 go on, 1 stop.
+# hand since the crash, and those edits must survive. 0 go on; 1 stop, the
+# stash failed; 2 stop, the unit's driver still runs (the user was told).
 recover_interrupted_unit() {
   [ -e "$UNIT_FLAG" ] || return 0
-  local what
+  local what pid
   what="$(cat "$UNIT_FLAG" 2>/dev/null)"
+  # The flag of a driver that still runs is no killed run's. This run holds
+  # the lock only because that driver's was removed by hand or taken as
+  # stale, and stashing its unit took the half page from under it and left
+  # two runs working in one tree. So this run stops, and the lock goes back
+  # to that driver: its touches and its exit find the lock again, and every
+  # later job waits for it. A pid that is this run's own was an earlier
+  # process's, and one that runs no A5N driver now was reused: either flag
+  # is a killed run's. The check asks ps, which sees a driver another user
+  # runs; kill -0 cannot signal one.
+  pid="${${what##*| pid }%% *}"
+  if [[ "$pid" == <-> ]] && [ "$pid" != $$ ] && lock_owner_is_a5n "$pid"; then
+    lock_guarded lock_give "$pid" || lock_give "$pid"
+    LOCK_TAKEN=""
+    notify_fail "A5N run pid $pid is still inside a unit (${what%% | pid *}) after losing its lock; this run stopped without touching the vault and gave the lock back"
+    return 2
+  fi
   if [ -n "$(git status --porcelain)" ]; then
     if ! git stash push -u -m "a5n: interrupted unit ($what)" >> "$LOG" 2>&1; then
       notify_fail "an interrupted unit ($what) left changes and git stash failed, run stopped, look by hand"
@@ -290,6 +307,13 @@ lock_wait() {  # <job>: ingest, lint or digest
 lock_drop() {  # under the guard: the lock goes only while it holds this run's pid
   [ "$(cat "$LOCK" 2>/dev/null)" = $$ ] && rm -f "$LOCK"
   return 0
+}
+
+# Under the guard: this run's lock goes to pid $1, a driver that still runs
+# a unit although it lost the lock (recover_interrupted_unit has why).
+lock_give() {
+  [ "$(cat "$LOCK" 2>/dev/null)" = $$ ] || return 0
+  print -r -- "$1" >| "$LOCK"
 }
 
 # EXIT trap. Only a lock this run took, and only while it is still this

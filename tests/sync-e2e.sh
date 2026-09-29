@@ -1716,6 +1716,50 @@ t_local_suspend() {
   check_eq "the lint committed its report" 1 "$(git -C "$v" log --format=%s | grep -c '^chore: lint(alpha)')"
 }
 
+# A job that found the unit flag of a driver that still runs, whose lock was
+# removed by hand say, took the unit for a killed run's: it stashed the half
+# written page, notified that a killed run left it, and ran next to the
+# driver. It stops now, the flag stays, and the lock goes back to the
+# driver. A flag whose pid went to a program that is no A5N run is still a
+# killed run's.
+t_local_unit_alive() {
+  world localunitalive
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  local v="$W/m1/vault" flag="$W/m1/vault/.a5n-logs/.unit-in-progress" ing drv rc other
+  FAKE_RUNNER_SLEEP=8 FAKE_RUNNER_PIDFILE="$W/runner.pid" a5n m1 daily-ingest.sh &
+  ing=$!
+  wait_for "the ingest worker started" "[ -s '$W/runner.pid' ]" || return
+  drv="$(sed -n 's/.* | pid \([0-9]*\) | .*/\1/p' "$flag")"
+  rm -f "$v/.a5n-logs/.lock"
+  a5n m1 weekly-lint.sh
+  rc=$?
+  check_eq "the lint stops the way a skipped run does" 0 "$rc"
+  check_eq "the running unit was not stashed" "" "$(git -C "$v" stash list)"
+  check "the unit flag stays with the running unit" test -e "$flag"
+  has "the user is told which run holds which unit" "$(calls notify)" \
+    "A5N run pid $drv is still inside a unit (ingest alpha/${A1:0:8})"
+  check_eq "the lock went back to the running ingest" "$drv" \
+    "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+  wait "$ing"
+  check_eq "the ingest finished its unit" 1 "$(pages_for "$v" "$A1")"
+  check_eq "no lint worker ran next to it" "" "$(overlap)"
+  has_not "and no lint report was committed" "$(git -C "$v" log --format=%s)" "chore: lint("
+  check "the ingest removed the lock it got back" test ! -e "$v/.a5n-logs/.lock"
+  sleep 300 &
+  other=$!
+  print -r -- "ingest alpha/${A2:0:8} | pid $other | 2026-09-29 09:07:00" > "$flag"
+  print -r -- "half a page" > "$v/alpha/half.md"
+  forget_calls
+  a5n m1 daily-ingest.sh
+  has "a pid that runs no A5N driver marks a killed run's unit" "$(git -C "$v" stash list)" \
+    "a5n: interrupted unit (ingest alpha/${A2:0:8}"
+  has "which is reported as before" "$(calls notify)" "git stash list"
+  kill "$other"
+  wait "$other" 2>/dev/null
+}
+
 # Every zsh script reads the user's .zshenv first, the drivers too, and an
 # option set there changed what their patterns mean. With KSH_GLOB the
 # running driver check matched nothing, and a lock three hours old was
@@ -1785,6 +1829,14 @@ t_local_lock_rules() {
   rm -f "$lock"
   check_eq "a run's exit leaves a lock another pid holds by now" 999999 \
     "$(lock_lib 'lock_take; print -r -- 999999 > "$LOCK"; lock_release; cat "$LOCK" 2>/dev/null')"
+  # A unit flag with this run's own pid was an earlier process's: a killed
+  # run's unit, stashed, although this run is a driver. ": daily-ingest.sh"
+  # puts a driver's name on this process's command line.
+  print -r -- "half a page" > "$W/m1/vault/half.md"
+  check_eq "a unit flag with this run's own pid is a killed run's" 0 \
+    "$(lock_lib ': daily-ingest.sh; cd "$VAULT"; print -r -- "ingest alpha/1a2b3c4d | pid $$ | now" > "$UNIT_FLAG"; recover_interrupted_unit; print -r -- $?')"
+  has "its leftovers went to the stash" "$(git -C "$W/m1/vault" stash list)" \
+    "a5n: interrupted unit (ingest alpha/1a2b3c4d"
 }
 
 # The second lock cannot be taken: zsh/system missing, a file system
