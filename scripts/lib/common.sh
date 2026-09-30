@@ -4,11 +4,49 @@
 # sets LOGDIR, LOG and LOCK; recover_interrupted_unit and
 # commit_manual_changes run with the vault as their working directory.
 
+# A command under a wall clock: TERM after <seconds>, KILL five seconds
+# later. Without one a hung push kept the driver alive, so the pid in the
+# local lock stayed alive too, and every later run waited behind it and
+# skipped: a live A5N run keeps its lock however old. lib/sync.sh runs its
+# network commands through this, and the macOS notification below runs
+# through it too. macOS has no timeout(1): this is the TERM-trapped watchdog
+# the unit worker uses, whose sleep dies with it so nothing holds the
+# caller's stdout open.
+a5n_bounded() {  # <seconds> <command...>
+  local secs="$1" pid watchdog rc
+  shift
+  "$@" < /dev/null &
+  pid=$!
+  # KILL is the last word, for the sleep and for the command: a process
+  # started while a signal trap runs inherits that signal blocked, and the
+  # lock release runs from the drivers' TERM trap. With TERM alone the
+  # sleep outlived the run and systemctl stop waited 90 s for it, then
+  # marked the stop failed.
+  (
+    trap 'kill -KILL $! 2>/dev/null; exit 0' TERM
+    sleep "$secs" & wait $!
+    kill -TERM "$pid" 2>/dev/null || exit 0
+    sleep 5 & wait $!
+    kill -KILL "$pid" 2>/dev/null
+  ) > /dev/null 2>&1 &
+  watchdog=$!
+  wait "$pid"
+  rc=$?
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  return $rc
+}
+
 # Desktop notification, $1 title, $2 message. Never fails the run.
 a5n_desktop_notify() {
   [ -n "${A5N_NO_NOTIFY:-}" ] && return 0
   if [ "$(uname)" = "Darwin" ]; then
-    /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1
+    # The ten seconds notify-send gets below, for the same reason. No hang
+    # of osascript has been seen, but it was the one call a macOS run made
+    # with no bound, and a run that hangs keeps its lock for good.
+    # A5N_OSASCRIPT replaces the path in tests/sync-e2e.sh: no PATH shim
+    # can reach an absolute one.
+    a5n_bounded 10 "${A5N_OSASCRIPT:-/usr/bin/osascript}" -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1
     return 0
   fi
   command -v notify-send >/dev/null 2>&1 || return 0
@@ -39,14 +77,43 @@ unit_end() {
   rm -f "$UNIT_FLAG"
 }
 
+# The flag of a driver that still runs is no killed run's. This run holds
+# the lock only because that driver's was removed by hand or taken as stale,
+# and stashing its unit took the half page from under it and left two runs
+# working in one tree. So this run stops, and the lock goes back to that
+# driver: its touches and its exit find the lock again, and every later job
+# waits for it. A pid that is this run's own was an earlier process's, and
+# one that does not run the driver of the flag's job now was reused, by
+# another program or by another job's driver (catch-ups that start together
+# after a reboot can get the last boot's pids): either flag is a killed
+# run's. The check asks ps, which sees a driver another user runs; kill -0
+# cannot signal one. The drivers ask right after they take the lock: any of
+# their own checks after it can end the run, and the exit removed the lock
+# where it had to go back. recover_interrupted_unit asks again, since a
+# driver without its lock can start its next unit meanwhile. 0 when that
+# driver runs: the lock went back and the user was told.
+unit_driver_runs() {
+  [ -e "$UNIT_FLAG" ] || return 1
+  local what pid
+  what="$(cat "$UNIT_FLAG" 2>/dev/null)"
+  pid="${${what##*| pid }%% *}"
+  [[ "$pid" == <-> ]] && [ "$pid" != $$ ] && pid_runs_job "$pid" "${what%% *}" || return 1
+  lock_guarded lock_give "$pid" || lock_give "$pid"
+  LOCK_TAKEN=""
+  notify_fail "A5N run pid $pid is still inside a unit (${what%% | pid *}) after losing its lock; this run stopped without touching the vault and gave the lock back; run it again by hand once that run is done"
+  return 0
+}
+
 # Run before the "manual changes" commit. A driver killed mid unit (a
 # service stopped, a lid closed on a dying battery) leaves half written
 # pages, and that commit used to sweep them into history as if a person had
 # written them; with sync on it would push them to the other machine too.
 # They go to a stash rather than away: the user may have edited the vault by
-# hand since the crash, and those edits must survive. 0 go on, 1 stop.
+# hand since the crash, and those edits must survive. 0 go on; 1 stop, the
+# stash failed; 2 stop, the unit's driver still runs (unit_driver_runs).
 recover_interrupted_unit() {
   [ -e "$UNIT_FLAG" ] || return 0
+  unit_driver_runs && return 2
   local what
   what="$(cat "$UNIT_FLAG" 2>/dev/null)"
   if [ -n "$(git status --porcelain)" ]; then
@@ -121,6 +188,19 @@ lock_read() {
 # exported COLUMNS even into a pipe, and a cut line hid a running driver.
 lock_owner_is_a5n() {
   [[ "$(ps -ww -p "$1" -o command= 2>/dev/null)" == *(daily-ingest|weekly-lint|digest).sh* ]]
+}
+
+# Whether pid $1 runs the driver of job $2 (ingest, lint or digest), read
+# the same way.
+pid_runs_job() {
+  local script
+  case "$2" in
+    ingest) script=daily-ingest.sh ;;
+    lint) script=weekly-lint.sh ;;
+    digest) script=digest.sh ;;
+    *) return 1 ;;
+  esac
+  [[ "$(ps -ww -p "$1" -o command= 2>/dev/null)" == *"$script"* ]]
 }
 
 # A stale lock would swallow every later run. A dead owner pid frees it at
@@ -252,6 +332,13 @@ lock_wait() {  # <job>: ingest, lint or digest
 lock_drop() {  # under the guard: the lock goes only while it holds this run's pid
   [ "$(cat "$LOCK" 2>/dev/null)" = $$ ] && rm -f "$LOCK"
   return 0
+}
+
+# Under the guard: this run's lock goes to pid $1, a driver that still runs
+# a unit although it lost the lock (recover_interrupted_unit has why).
+lock_give() {
+  [ "$(cat "$LOCK" 2>/dev/null)" = $$ ] || return 0
+  print -r -- "$1" >| "$LOCK"
 }
 
 # EXIT trap. Only a lock this run took, and only while it is still this

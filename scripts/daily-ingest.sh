@@ -39,6 +39,27 @@
 # A5N_SYNC_WAIT / A5N_SYNC_POLL / A5N_SYNC_RETRY_DELAY shorten its waits in
 # tests, and A5N_LOCK_WAIT / A5N_LOCK_POLL the wait for the local lock
 # (scripts/lib/common.sh).
+
+# zsh runs the user's .zshenv before this line, and what it sets reaches
+# every line below. With KSH_GLOB the running driver check in
+# lib/common.sh matched nothing, and a waiting job took a live run's lock;
+# with SH_GLOB lib/common.sh and lib/sync.sh did not even parse, and every
+# ingest logged a lock nobody held and skipped. -R resets every option, not
+# only the ones plain emulation resets: that one leaves FORCE_FLOAT, which
+# turns the lock's age into a float and its comparison into an error. No
+# emulation touches aliases, functions or SECONDS: an alias or a function
+# named ps fooled the running driver check just the same, and a float
+# SECONDS (typeset -F) ended every wait at its first look. \builtin, since
+# an alias or a function the .zshenv gave one of these names would run in
+# its place: a no-op emulate left SH_GLOB set (found by Codex). A function
+# named builtin, or a global alias, still gets past this; a .zshenv can run
+# any code before this line, and the reset is for what one sets by
+# accident. Variables, PATH among them, stay as the .zshenv set them. zsh -x
+# traces up to here only; a setopt xtrace below this line traces the rest.
+\builtin emulate -R zsh
+\builtin unalias -m '*'
+\builtin unfunction -m '*' 2>/dev/null
+\builtin typeset -i SECONDS
 set -u
 
 SCRIPT_DIR="${0:A:h}"
@@ -155,6 +176,11 @@ if ! lock_wait ingest; then
   exit 0
 fi
 
+# A unit whose driver still runs, one that lost its lock: stop before any
+# check below can end this run, since that exit would remove the lock where
+# it has to go back to that driver (lib/common.sh, unit_driver_runs).
+unit_driver_runs && exit 0
+
 cd "$VAULT" || exit 1
 
 if [ ! -s "$UNIT_PROMPT_FILE" ]; then
@@ -165,9 +191,14 @@ fi
 # Before anything writes: with sync, A5N's own interrupted rebase is undone
 # and a user's unfinished git operation or another branch stops the run;
 # then a unit a killed run left half written goes to the stash, so the
-# commit below cannot sweep it in as manual edits.
+# commit below cannot sweep it in as manual edits. A unit whose driver still
+# runs stops this run instead, the way a lock held too long skips it.
 sync_recover || exit 0
-recover_interrupted_unit || exit 1
+recover_interrupted_unit
+case $? in
+  1) exit 1 ;;
+  2) exit 0 ;;
+esac
 
 # Hand written vault edits should not be mixed into ingest commits. Commit
 # them separately under an honest message.

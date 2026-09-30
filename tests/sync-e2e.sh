@@ -1,8 +1,8 @@
 #!/bin/zsh
 # End to end tests for A5N's [sync] section and the fixes that shipped with
 # it: the interrupted unit stash, .gitkeep placeholders, schedule "off" and
-# Linux notifications. The local lock the three jobs share is tested here
-# too (the t_local_* scenarios).
+# desktop notifications, the macOS one through stand ins. The local lock
+# the three jobs share is tested here too (the t_local_* scenarios).
 #
 # Everything happens inside one temporary directory, whose name contains
 # spaces on purpose so every path the drivers handle is exercised quoted. A
@@ -46,6 +46,9 @@ PASSED=0; FAILED=0; FAILURES=(); CURRENT=""
 # --- isolation ---------------------------------------------------------------
 export HOME="$TOP/home"
 export XDG_CONFIG_HOME="$HOME/.config"
+# Every zsh reads $ZDOTDIR/.zshenv, or $HOME/.zshenv without ZDOTDIR: none of
+# the user's reaches a driver here, only one a scenario writes itself.
+unset ZDOTDIR
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME="A5N Test" GIT_AUTHOR_EMAIL="test@example.invalid"
 export GIT_COMMITTER_NAME="A5N Test" GIT_COMMITTER_EMAIL="test@example.invalid"
@@ -58,7 +61,7 @@ export A5N_SYNC_RETRY_DELAY=0 A5N_SYNC_POLL=1 A5N_SYNC_WAIT=3
 # the two hours a real run waits.
 export A5N_LOCK_POLL=1 A5N_LOCK_WAIT=30
 export A5N_PROMPT_FILE="$TOP/unit-prompt.md" A5N_LINT_PROMPT_FILE="$TOP/lint-prompt.md"
-unset A5N_NO_NOTIFY A5N_CONFIG A5N_MAX_UNITS A5N_UNIT_TIMEOUT A5N_LINT_PROJECTS
+unset A5N_NO_NOTIFY A5N_CONFIG A5N_MAX_UNITS A5N_UNIT_TIMEOUT A5N_LINT_PROJECTS A5N_OSASCRIPT
 unset FAKE_RUNNER_HOOK FAKE_RUNNER_SLEEP FAKE_RUNNER_PIDFILE FAKE_RUNNER_SHARED
 mkdir -p "$XDG_CONFIG_HOME" "$TOP/bin" "$A5N_TEST_CALLS"
 print -r -- "[fakedrive]
@@ -438,6 +441,41 @@ t_notify_linux() {
   check_eq "A5N_NO_NOTIFY silences it" "" "$(calls notify)"
 }
 
+# macOS has no timeout(1), and osascript ran with no bound: a notification
+# that hung held its run, and the run's local lock, for good, since a live
+# A5N run keeps its lock however old. Nothing here is macOS: uname answers
+# Darwin for this scenario only, and A5N_OSASCRIPT stands in for
+# /usr/bin/osascript, which no PATH shim can reach.
+t_notify_mac() {
+  world notifymac
+  machine_config m1 off yes alpha
+  machine_local m1
+  local v="$W/m1/vault" start took pid
+  mkdir -p "$W/darwin"
+  print -r -- '#!/bin/sh
+echo Darwin' > "$W/darwin/uname"
+  # It hangs and ignores TERM too, so only the KILL ends it. An ignored
+  # signal stays ignored across exec, and the sleep is the whole process.
+  print -r -- "#!/bin/sh
+trap '' TERM
+echo \$\$ > '$W/osascript.pid'
+printf '%s\n' \"\$*\" >> '$W/calls/osascript.log'
+exec sleep 40" > "$W/osascript"
+  chmod +x "$W/darwin/uname" "$W/osascript"
+  start=$SECONDS
+  # A missing unit prompt: the ingest notifies while it holds the lock.
+  PATH="$W/darwin:$PATH" A5N_OSASCRIPT="$W/osascript" A5N_PROMPT_FILE="$W/missing.md" \
+    a5n m1 daily-ingest.sh
+  took=$(( SECONDS - start ))
+  has "osascript got the title" "$(calls osascript)" 'with title "A5N ingest"'
+  has "osascript got the message" "$(calls osascript)" "unit prompt missing or empty"
+  check_eq "notify-send is not used on macOS" "" "$(calls notify)"
+  check "a hung notification ends after 10s and a 5s grace" test "$took" -lt 20
+  check "the run left no lock behind" test ! -e "$v/.a5n-logs/.lock"
+  pid="$(cat "$W/osascript.pid" 2>/dev/null)"
+  check "the hung notification was killed" sh -c "[ -n '$pid' ] && ! kill -0 '$pid' 2>/dev/null"
+}
+
 t_interrupted_unit() {
   world interrupted
   machine_config m1 off yes alpha
@@ -675,8 +713,8 @@ t_bounded() {
     LOGDIR="$W" LOG="$W/log" LOCK="$W/lock" VAULT="$W"
     log() { :; }
     notify_fail() { :; }
-    source "$REPO/scripts/lib/sync.sh"
-    sync_bounded 1 sleep 30
+    source "$REPO/scripts/lib/common.sh"
+    a5n_bounded 1 sleep 30
   )
   rc=$?
   check "a hung command is cut" test "$rc" -ne 0
@@ -687,8 +725,8 @@ t_bounded() {
     LOGDIR="$W" LOG="$W/log" LOCK="$W/lock" VAULT="$W"
     log() { :; }
     notify_fail() { :; }
-    source "$REPO/scripts/lib/sync.sh"
-    sync_bounded 5 sh -c 'exit 7'
+    source "$REPO/scripts/lib/common.sh"
+    a5n_bounded 5 sh -c 'exit 7'
   )
   check_eq "a finished command keeps its exit status" 7 "$?"
 }
@@ -700,6 +738,9 @@ lock_try() {  # <machine>: one attempt through the library, prints taken or busy
     VAULT="$PWD" LOGDIR="$PWD/.a5n-logs" LOG="$PWD/.a5n-logs/lock-test.log" LOCK="$PWD/.a5n-logs/.lock"
     log() { print -r -- "$*" >> "$LOG"; }
     notify_fail() { log "FAILED: $1"; }
+    # lib/sync.sh's contract: lib/common.sh first, its network commands run
+    # under a5n_bounded.
+    source "$REPO/scripts/lib/common.sh"
     source "$REPO/scripts/lib/sync.sh"
     # Distinct per machine: both subshells share this script's pid, and two
     # identical lock commits would make the race meaningless.
@@ -1675,6 +1716,188 @@ t_local_suspend() {
   check_eq "the lint committed its report" 1 "$(git -C "$v" log --format=%s | grep -c '^chore: lint(alpha)')"
 }
 
+# The job that meets a unit whose driver still runs gives the lock back
+# before any check of its own can end the run. Those checks came first: a
+# missing prompt ended the ingest and the lint, another branch ended the
+# digest with sync on, and the exit removed the lock where it had to go back
+# (found by Codex). The unit's driver is played by a process whose command
+# line names the ingest's driver, and the flag names it.
+t_local_unit_alive_early() {
+  world localunitearly
+  machine_config m1 off yes alpha
+  machine_local m1
+  local v="$W/m1/vault" holder drv rc
+  zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' daily-ingest.sh &
+  holder=$!
+  for drv in daily-ingest.sh weekly-lint.sh; do
+    print -r -- "ingest alpha/1a2b3c4d | pid $holder | 2026-09-29 09:07:00" > "$v/.a5n-logs/.unit-in-progress"
+    rm -f "$v/.a5n-logs/.lock"
+    forget_calls
+    A5N_PROMPT_FILE="$W/missing.md" A5N_LINT_PROMPT_FILE="$W/missing.md" a5n m1 "$drv"
+    rc=$?
+    check_eq "a $drv with no prompt stops the way a skipped run does" 0 "$rc"
+    check_eq "and gives the lock back before that check ($drv)" "$holder" \
+      "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+    has "it names the running unit ($drv)" "$(calls notify)" \
+      "A5N run pid $holder is still inside a unit (ingest alpha/1a2b3c4d)"
+  done
+  kill "$holder"
+  wait "$holder" 2>/dev/null
+  world localunitearlysync
+  machine_config m1 on yes alpha
+  machine_new m1
+  v="$W/m1/vault"
+  a5n m1 daily-ingest.sh
+  git -C "$v" checkout -q -b drafts
+  zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' daily-ingest.sh &
+  holder=$!
+  print -r -- "ingest alpha/1a2b3c4d | pid $holder | 2026-09-29 09:07:00" > "$v/.a5n-logs/.unit-in-progress"
+  forget_calls
+  a5n m1 digest.sh > /dev/null
+  rc=$?
+  check_eq "a digest on another branch stops the way a skipped run does" 0 "$rc"
+  check_eq "and gives the lock back before that check (digest)" "$holder" \
+    "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+  has "it names the running unit (digest)" "$(calls notify)" \
+    "A5N run pid $holder is still inside a unit (ingest alpha/1a2b3c4d)"
+  kill "$holder"
+  wait "$holder" 2>/dev/null
+}
+
+# A job that found the unit flag of a driver that still runs, whose lock was
+# removed by hand say, took the unit for a killed run's: it stashed the half
+# written page, notified that a killed run left it, and ran next to the
+# driver. It stops now, the flag stays, and the lock goes back to the
+# driver; each of the three drivers stops once here. A flag whose pid went
+# to a program that is no A5N run, or to another job's driver (catch-ups
+# after a reboot can get the pids of the last boot's), is a killed run's.
+t_local_unit_alive() {
+  world localunitalive
+  machine_config m1 off yes alpha
+  machine_local m1
+  local v="$W/m1/vault" flag="$W/m1/vault/.a5n-logs/.unit-in-progress" month other
+  month="$(date -d "$(date +%Y-%m-01) -1 month" +%Y-%m)"
+  stop_next_to() {  # <running driver> <stopping driver> <the unit its flag names>
+    local live="$1" stop="$2" unit="$3" run drv head rc
+    rm -f "$W/runner.pid"
+    FAKE_RUNNER_SLEEP=8 FAKE_RUNNER_PIDFILE="$W/runner.pid" a5n m1 "$live" > /dev/null &
+    run=$!
+    wait_for "the $live worker started" "[ -s '$W/runner.pid' ]" || return 1
+    drv="$(sed -n 's/.* | pid \([0-9]*\) | .*/\1/p' "$flag")"
+    rm -f "$v/.a5n-logs/.lock"
+    head="$(git -C "$v" rev-parse HEAD)"
+    forget_calls
+    a5n m1 "$stop" > /dev/null
+    rc=$?
+    check_eq "the $stop stops the way a skipped run does" 0 "$rc"
+    check_eq "the $stop stashed nothing" "" "$(git -C "$v" stash list)"
+    check_eq "the $stop committed nothing" "$head" "$(git -C "$v" rev-parse HEAD)"
+    check "the flag stays with the running unit ($stop)" test -e "$flag"
+    has "the $stop says which run holds which unit" "$(calls notify)" \
+      "A5N run pid $drv is still inside a unit ($unit)"
+    check_eq "the $stop gave the lock back to the running $live" "$drv" \
+      "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+    wait "$run"
+    check_eq "no worker ran next to the running $live ($stop)" "" "$(overlap)"
+    check "the $live removed the lock it got back ($stop)" test ! -e "$v/.a5n-logs/.lock"
+  }
+  session m1 alpha "$A1" 2026-09-01
+  stop_next_to daily-ingest.sh weekly-lint.sh "ingest alpha/${A1:0:8}" || return
+  check_eq "the ingest finished its unit" 1 "$(pages_for "$v" "$A1")"
+  session m1 alpha "$A2" 2026-09-02
+  stop_next_to weekly-lint.sh daily-ingest.sh "lint alpha" || return
+  check "the stopped ingest captured nothing" test ! -e "$v/alpha/raw/sessions/$A2.jsonl"
+  check_eq "the lint committed its report" 1 \
+    "$(git -C "$v" log --format=%s | grep -c '^chore: lint(alpha)')"
+  stop_next_to daily-ingest.sh digest.sh "ingest alpha/${A2:0:8}" || return
+  check "the stopped digest wrote nothing" test ! -e "$v/digests/$month.md"
+  check_eq "the ingest finished that unit" 1 "$(pages_for "$v" "$A2")"
+  sleep 300 &
+  other=$!
+  print -r -- "ingest alpha/${B1:0:8} | pid $other | 2026-09-29 09:07:00" > "$flag"
+  print -r -- "half a page" > "$v/alpha/half.md"
+  forget_calls
+  a5n m1 daily-ingest.sh
+  has "a pid that runs no A5N driver marks a killed run's unit" "$(git -C "$v" stash list)" \
+    "a5n: interrupted unit (ingest alpha/${B1:0:8}"
+  has "which is reported as before" "$(calls notify)" "git stash list"
+  kill "$other"
+  wait "$other" 2>/dev/null
+  zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' weekly-lint.sh &
+  other=$!
+  print -r -- "ingest alpha/${G1:0:8} | pid $other | 2026-09-29 09:07:00" > "$flag"
+  print -r -- "another half page" > "$v/alpha/half2.md"
+  a5n m1 daily-ingest.sh
+  has "a pid that runs another job's driver marks a killed run's unit" \
+    "$(git -C "$v" stash list)" "a5n: interrupted unit (ingest alpha/${G1:0:8}"
+  kill "$other"
+  wait "$other" 2>/dev/null
+}
+
+# Every zsh script reads the user's .zshenv first, the drivers too, and an
+# option set there changed what their patterns mean. With KSH_GLOB the
+# running driver check matched nothing, and a lock three hours old was
+# taken from a running driver. With SH_GLOB lib/common.sh and lib/sync.sh
+# did not even parse: every ingest logged a lock nobody held and skipped.
+t_local_zshenv() {
+  world localzshenv
+  machine_config m1 off yes alpha
+  machine_local m1
+  local v="$W/m1/vault" holder env drv job opt out sid day month start took
+  mkdir -p "$W/zdot"
+  # What ps shows for a running driver. It waits for its sleep instead of
+  # becoming it, so the name stays on its command line, and takes the sleep
+  # along when it is killed.
+  zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' daily-ingest.sh &
+  holder=$!
+  # Options, and what emulation leaves alone: an alias or a function that
+  # takes the name of ps, and a float SECONDS. FORCE_FLOAT and a float
+  # SECONDS ended the wait at its first look. The last two stand in for
+  # the reset commands themselves (found by Codex): a no-op emulate left
+  # SH_GLOB set, a no-op unalias or unfunction left the ps above. Every
+  # driver, since each resets for itself.
+  waited_whole() {  # the wait was logged and took all of A5N_LOCK_WAIT
+    [ "$took" -ge 2 ] && vlog m1 "$job" | grep -q 'waiting for the local lock'
+  }
+  for env in 'setopt kshglob' 'setopt shglob' 'setopt forcefloat' 'alias ps=true' \
+      'ps() { true; }' 'typeset -F SECONDS' \
+      'setopt shglob; emulate() { :; }; alias unalias=: ps=true' \
+      'setopt shglob; alias emulate=:; unfunction() { :; }; ps() { true; }'; do
+    print -r -- "$env" > "$W/zdot/.zshenv"
+    for drv job in daily-ingest.sh ingest weekly-lint.sh lint digest.sh digest; do
+      print -r -- "$holder" > "$v/.a5n-logs/.lock"
+      touch -d '3 hours ago' "$v/.a5n-logs/.lock"
+      rm -f "$v/.a5n-logs/"*"$TODAY.log"(N)
+      start=$SECONDS
+      out="$(ZDOTDIR="$W/zdot" A5N_LOCK_WAIT=2 a5n m1 "$drv" 2>&1)"
+      took=$(( SECONDS - start ))
+      check_eq "the $job parses with '$env'" "" "$(print -r -- "$out" | grep 'parse error')"
+      check "the $job waits the whole wait for a running driver ('$env')" waited_whole
+      check_eq "and leaves its lock alone ($job, '$env')" "$holder" \
+        "$(cat "$v/.a5n-logs/.lock" 2>/dev/null)"
+    done
+  done
+  kill "$holder"
+  wait "$holder" 2>/dev/null
+  # Whole runs, each first meeting a lock three hours old whose pid, this
+  # script's, is no A5N run: a stale lock, found through the patterns and
+  # the arithmetic the options change. FORCE_FLOAT made the lock's age a
+  # float and its comparison an error, and plain emulation leaves it set.
+  for opt sid day in kshglob "$A1" 2026-09-01 shglob "$A2" 2026-09-02 forcefloat "$B1" 2026-09-03; do
+    print -r -- "setopt $opt" > "$W/zdot/.zshenv"
+    session m1 alpha "$sid" "$day"
+    print -r -- $$ > "$v/.a5n-logs/.lock"
+    touch -d '3 hours ago' "$v/.a5n-logs/.lock"
+    ZDOTDIR="$W/zdot" A5N_LOCK_WAIT=3 a5n m1 daily-ingest.sh
+    check_eq "an ingest with $opt set processes its session" 1 "$(pages_for "$v" "$sid")"
+  done
+  # SH_GLOB alone: KSH_GLOB next to it makes those patterns parse again.
+  print -r -- "setopt shglob" > "$W/zdot/.zshenv"
+  month="$(date -d "$(date +%Y-%m-01) -1 month" +%Y-%m)"
+  ZDOTDIR="$W/zdot" a5n m1 digest.sh > /dev/null
+  check "a digest with shglob set is written" test -f "$v/digests/$month.md"
+}
+
 # The lock's small rules, each in a process of its own. A lock with this
 # process's own pid was left by an earlier process that had the pid: the
 # run used to wait for itself. A lock is empty for an instant after another
@@ -1695,6 +1918,30 @@ t_local_lock_rules() {
   rm -f "$lock"
   check_eq "a run's exit leaves a lock another pid holds by now" 999999 \
     "$(lock_lib 'lock_take; print -r -- 999999 > "$LOCK"; lock_release; cat "$LOCK" 2>/dev/null')"
+  # A unit flag with this run's own pid was an earlier process's: a killed
+  # run's unit, stashed, although this run is a driver. ": daily-ingest.sh"
+  # puts a driver's name on this process's command line.
+  print -r -- "half a page" > "$W/m1/vault/half.md"
+  check_eq "a unit flag with this run's own pid is a killed run's" 0 \
+    "$(lock_lib ': daily-ingest.sh; cd "$VAULT"; print -r -- "ingest alpha/1a2b3c4d | pid $$ | now" > "$UNIT_FLAG"; recover_interrupted_unit; print -r -- $?')"
+  has "its leftovers went to the stash" "$(git -C "$W/m1/vault" stash list)" \
+    "a5n: interrupted unit (ingest alpha/1a2b3c4d"
+  # The recovery asks as well, for a driver without its lock that starts
+  # its next unit after the run's first look: that unit stays where it is,
+  # and its driver gets the lock.
+  local holder stashes
+  zsh -fc 'trap "kill \$! 2>/dev/null; exit 0" TERM; sleep 300 & wait $!' daily-ingest.sh &
+  holder=$!
+  print -r -- "ingest alpha/5e6f7a8b | pid $holder | now" > "$W/m1/vault/.a5n-logs/.unit-in-progress"
+  print -r -- "a running unit's half page" > "$W/m1/vault/half-running.md"
+  stashes="$(git -C "$W/m1/vault" stash list | wc -l)"
+  rm -f "$lock"
+  check_eq "the recovery leaves a running driver's unit alone" 2 \
+    "$(lock_lib 'cd "$VAULT"; lock_take; recover_interrupted_unit; print -r -- $?')"
+  check_eq "and stashes nothing" "$stashes" "$(git -C "$W/m1/vault" stash list | wc -l)"
+  check_eq "and gives that driver the lock" "$holder" "$(cat "$lock" 2>/dev/null)"
+  kill "$holder"
+  wait "$holder" 2>/dev/null
 }
 
 # The second lock cannot be taken: zsh/system missing, a file system

@@ -23,6 +23,15 @@
 # Testing: point A5N_CONFIG at a scratch config, and use A5N_LINT_PROJECTS
 # ("acme-shop other" narrows the project list) / A5N_UNIT_TIMEOUT /
 # A5N_NO_NOTIFY.
+
+# What the user's .zshenv set, options, aliases, functions and a float
+# SECONDS, goes before the lock and sync code loads, through \builtin so
+# none of them runs in place of these commands: daily-ingest.sh has the
+# failures behind this.
+\builtin emulate -R zsh
+\builtin unalias -m '*'
+\builtin unfunction -m '*' 2>/dev/null
+\builtin typeset -i SECONDS
 set -u
 
 SCRIPT_DIR="${0:A:h}"
@@ -123,6 +132,10 @@ if ! lock_wait lint; then
   exit 0
 fi
 
+# A unit whose driver still runs stops the lint before its own checks can
+# end it and remove the lock that has to go back (as in daily-ingest.sh).
+unit_driver_runs && exit 0
+
 cd "$VAULT" || exit 1
 
 if [ ! -s "$PROMPT_FILE" ]; then
@@ -133,9 +146,14 @@ fi
 # Before anything writes: with sync, A5N's own interrupted rebase is undone
 # and a user's unfinished git operation or another branch stops the run;
 # then a unit a killed run left half written goes to the stash, so the
-# commit below cannot sweep it in as manual edits.
+# commit below cannot sweep it in as manual edits. A unit whose driver still
+# runs stops this run instead, the way a lock held too long skips it.
 sync_recover || exit 0
-recover_interrupted_unit || exit 1
+recover_interrupted_unit
+case $? in
+  1) exit 1 ;;
+  2) exit 0 ;;
+esac
 
 # Hand written edits should not be mixed into lint commits.
 commit_manual_changes lint
