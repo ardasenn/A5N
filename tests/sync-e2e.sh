@@ -292,7 +292,7 @@ has_not() {  # <description> <text> <fixed string>
 
 t_config_validation() {
   world config
-  local cfg="$W/c.ini" out
+  local cfg="$W/c.ini" out bad
   mini() {  # <extra ini text>: a minimal valid config plus the given text
     print -r -- "[vault]
 path = $W/vault
@@ -314,6 +314,8 @@ $1" > "$cfg"
   has "lock defaults to yes" "$out" "export A5N_SYNC_LOCK='yes'"
   has "the wait for the remote defaults to 15 minutes" "$out" "export A5N_SYNC_OFFLINE_AFTER='900'"
   has "check says sync is off" "$(cfgout --check)" "sync: off"
+  has "the turn limit defaults to 150" "$out" "export A5N_MAX_TURNS='150'"
+  has "check names the turn limit" "$(cfgout --check)" "effort default, max turns 150"
 
   mini "[sync]
 enabled = YES
@@ -364,6 +366,32 @@ digest = OFF"
 lint = sometimes"
   has "a bad schedule still fails" "$(cfgout --check)" \
     "schedule.lint 'sometimes' is not valid"
+
+  mini "[limits]
+max_turns = 0200"
+  has "leading zeros are dropped from the turn limit" "$(cfgout --sh)" \
+    "export A5N_MAX_TURNS='200'"
+
+  # The claude CLI refuses a word here, which fails every worker, and takes
+  # 0 or 1.5 without complaint: config.py is the only judge.
+  for bad in 0 abc 1.5 -3 ""; do
+    mini "[limits]
+max_turns = $bad"
+    has "max_turns '$bad' is refused" "$(cfgout --check)" \
+      "limits.max_turns is '$bad', must be a whole number, 1 or more."
+  done
+
+  # codex exec has no turn limit, so check names none.
+  print -r -- "[vault]
+path = $W/vault
+[runner]
+engine = codex
+bin = /bin/true
+[project:alpha]
+match = alpha
+watermark = 2026-01-01" > "$cfg"
+  has "check prints the codex runner" "$(cfgout --check)" "runner: codex (/bin/true)"
+  has_not "check names no turn limit for codex" "$(cfgout --check)" "max turns"
 }
 
 t_setup_checks() {

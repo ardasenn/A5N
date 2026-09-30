@@ -46,6 +46,7 @@ DEFAULTS = {
         "min_session_kb": "50",
         "settle_hours": "2",
         "unit_timeout": "1800",
+        "max_turns": "150",
         "max_units": "15",
         "condense_over_kb": "2048",
     },
@@ -102,6 +103,7 @@ def load(path=None):
     _validate_runner(cfg["runner"])
     _validate_schedule(cfg["schedule"])
     _validate_sync(cfg["sync"])
+    _validate_limits(cfg["limits"])
 
     cfg["_projects"] = _projects(parser)
     cfg["_config_path"] = str(path)
@@ -171,6 +173,20 @@ def _validate_sync(sync):
         sync[key] = value
     raw = sync["raw_remote"].strip()
     sync["raw_remote"] = raw.rstrip("/") or raw
+
+
+def _validate_limits(limits):
+    """Only max_turns is checked: it reaches the claude CLI as --max-turns,
+    and the CLI is no judge of it. A word there fails every worker, and two
+    failures in a row stop the run with a notification that suspects the
+    API; 0 or 1.5 is taken without complaint, and the limit is silently not
+    the one this file names."""
+    turns = limits["max_turns"].strip()
+    if not re.fullmatch(r"[0-9]+", turns) or int(turns) < 1:
+        raise ConfigError(
+            f"limits.max_turns is '{limits['max_turns']}', must be a whole "
+            f"number, 1 or more.")
+    limits["max_turns"] = str(int(turns))
 
 
 # Effort is a closed list per engine and IS validated, because a typo here
@@ -291,6 +307,7 @@ def _emit_shell(cfg):
         "A5N_MIN_SESSION_KB": cfg["limits"]["min_session_kb"],
         "A5N_SETTLE_HOURS": cfg["limits"]["settle_hours"],
         "A5N_UNIT_TIMEOUT": cfg["limits"]["unit_timeout"],
+        "A5N_MAX_TURNS": cfg["limits"]["max_turns"],
         "A5N_MAX_UNITS": cfg["limits"]["max_units"],
         "A5N_CONDENSE_KB": cfg["limits"]["condense_over_kb"],
         "A5N_PROJECT_NAMES": " ".join(p["name"] for p in cfg["_projects"]),
@@ -353,8 +370,12 @@ def main(argv):
         except ConfigError as exc:
             sys.stderr.write(f"{exc}\n")
             return 1
+        # codex exec has no turn limit, so only claude's line names one.
+        turns = ""
+        if cfg["runner"]["engine"] == "claude":
+            turns = f", max turns {cfg['limits']['max_turns']}"
         print(f"runner: {cfg['runner']['engine']} ({resolved}), "
-              f"model {cfg['runner']['model']}, effort {effort}")
+              f"model {cfg['runner']['model']}, effort {effort}{turns}")
         sync = cfg["sync"]
         if sync["enabled"] == "yes":
             lock = "on" if sync["lock"] == "yes" else "off"
