@@ -18,7 +18,10 @@
 #
 # Every run writes a start and an end line, with its pid and working
 # directory, to $A5N_TEST_CALLS/workers.log: that is how a test sees two
-# workers running in one vault at the same time.
+# workers running in one vault at the same time. It also writes every
+# argument after the prompt, one line per run, to
+# $A5N_TEST_CALLS/runner.log: that is how a test sees what the driver
+# passed, the turn limit among them.
 set -u
 # Stopped with TERM, the runner takes its sleep along: a sleep left in the
 # driver's session would hide the leaks t_stopped_run looks for.
@@ -26,6 +29,7 @@ trap 'kill $! 2>/dev/null; exit 143' TERM
 trace() { [ -n "${A5N_TEST_CALLS:-}" ] && print -r -- "$1 $$ $PWD" >> "$A5N_TEST_CALLS/workers.log"; }
 trace start
 trap 'trace end' EXIT
+[ -n "${A5N_TEST_CALLS:-}" ] && print -r -- "${*:3}" >> "$A5N_TEST_CALLS/runner.log"
 
 prompt="${2:-}"
 kind="" project="" session="" raw="" date=""
