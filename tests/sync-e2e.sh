@@ -2,7 +2,8 @@
 # End to end tests for A5N's [sync] section and the fixes that shipped with
 # it: the interrupted unit stash, .gitkeep placeholders, schedule "off" and
 # desktop notifications, the macOS one through stand ins. The local lock
-# the three jobs share is tested here too (the t_local_* scenarios).
+# the three jobs share is tested here too (the t_local_* scenarios), and
+# the worker's turn limit from config.ini (t_max_turns).
 #
 # Everything happens inside one temporary directory, whose name contains
 # spaces on purpose so every path the drivers handle is exercised quoted. A
@@ -131,7 +132,8 @@ world() {  # <name>
 # CFG_SCHEDULE replaces the [schedule] body, CFG_RAW_REMOTE sync.raw_remote
 # (set it empty to keep raw files in git), CFG_OFFLINE_AFTER
 # sync.offline_after (0 unless set: no wait, the start every scenario before
-# the wait was written against).
+# the wait was written against), CFG_MAX_TURNS limits.max_turns (no line
+# unless set, so the default applies).
 machine_config() {
   local m="$1" sync="$2" lock="$3" enabled=no p
   shift 3
@@ -160,6 +162,7 @@ min_session_kb = 1
 settle_hours = 0
 unit_timeout = 60
 max_units = 15
+${CFG_MAX_TURNS:+max_turns = $CFG_MAX_TURNS}
 
 [sync]
 enabled = $enabled
@@ -238,6 +241,9 @@ vlog() {  # <machine> [ingest|lint|digest]: that machine's log of today
 }
 calls() { cat "$W/calls/$1.log" 2>/dev/null; }   # <shim name>
 forget_calls() { rm -f "$W/calls/"*.log(N); }
+turns_passed() {  # the --max-turns values the fake workers got, one per line
+  grep -oE -- '--max-turns [^ ]+' "$W/calls/runner.log" 2>/dev/null | cut -d' ' -f2 | sort -u
+}
 overlap() {  # the first moment two fake workers ran in one vault at once
   awk '{ v = $0; sub(/^[a-z]+ [0-9]+ /, "", v) }
        $1 == "start" && ++n[v] > 1 { print "two workers at once in " v; exit }
@@ -392,6 +398,41 @@ match = alpha
 watermark = 2026-01-01" > "$cfg"
   has "check prints the codex runner" "$(cfgout --check)" "runner: codex (/bin/true)"
   has_not "check names no turn limit for codex" "$(cfgout --check)" "max turns"
+}
+
+# The worker's turn limit comes from limits.max_turns: 150 when config.ini
+# has no such line, the configured value otherwise, in both drivers. A
+# value config.py refuses stops a driver before any worker starts.
+t_max_turns() {
+  world maxturns
+  local v="$W/m1/vault" out
+  machine_config m1 off yes alpha
+  machine_local m1
+  session m1 alpha "$A1" 2026-09-01
+  a5n m1 daily-ingest.sh
+  check_eq "the ingest worker gets 150 by default" 150 "$(turns_passed)"
+  forget_calls
+  a5n m1 weekly-lint.sh
+  check_eq "the lint worker gets 150 by default" 150 "$(turns_passed)"
+
+  forget_calls
+  CFG_MAX_TURNS=7 machine_config m1 off yes alpha
+  session m1 alpha "$A2" 2026-09-02
+  a5n m1 daily-ingest.sh
+  check_eq "the ingest worker gets the configured limit" 7 "$(turns_passed)"
+  forget_calls
+  a5n m1 weekly-lint.sh
+  check_eq "the lint worker gets the configured limit" 7 "$(turns_passed)"
+
+  forget_calls
+  CFG_MAX_TURNS=0 machine_config m1 off yes alpha
+  session m1 alpha "$G1" 2026-09-03
+  out="$(a5n m1 daily-ingest.sh 2>&1)"
+  has "a refused limit stops the ingest" "$out" "limits.max_turns is '0'"
+  out="$(a5n m1 weekly-lint.sh 2>&1)"
+  has "and the lint" "$out" "limits.max_turns is '0'"
+  check_eq "no worker started" "" "$(calls runner)"
+  check_eq "the session is still unprocessed" 0 "$(pages_for "$v" "$G1")"
 }
 
 t_setup_checks() {

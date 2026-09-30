@@ -133,7 +133,7 @@ start_worker() {
       --model "$A5N_RUNNER_MODEL" \
       "${effort[@]}" \
       --permission-mode acceptEdits \
-      --max-turns 80 \
+      --max-turns "$A5N_MAX_TURNS" \
       --disallowedTools "Agent" "Task" "ScheduleWakeup" "Workflow" "Bash(git commit:*)" "Bash(git push:*)" \
       > "$OUT" 2>&1 < /dev/null &
   fi
