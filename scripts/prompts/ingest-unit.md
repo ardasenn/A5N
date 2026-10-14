@@ -52,6 +52,15 @@ SPECIAL CASES
 - Continuation or compaction of a conversation already processed: do not
   open a new page, extend the existing source page and add __RAW__ to its
   ## Sources section.
+- Session id ending in "_cont" and a number (for example
+  "<id>_cont1"): the session was resumed after it was captured, and __RAW__
+  holds ONLY the part that came after. The earlier part is
+  raw/sessions/<id>.jsonl plus any "_cont" part with a lower number. Find
+  the source page that carries the earlier raw path, extend it with what
+  this part adds (a dated section is fine; keep the page's name), add
+  __RAW__ to its ## Sources section, and update the pages this part
+  changes. Only if no source page carries the earlier raw yet, write a new
+  source page for this part as in the steps above.
 
 RULES
 - FORBIDDEN: subagents/Agent/Task, ScheduleWakeup, background work,
