@@ -29,6 +29,7 @@ Before opening a PR:
 ```bash
 python3 -m py_compile scripts/*.py
 for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do zsh -n "$f"; done
+python3 tests/capture-continuation.py
 zsh tests/sync-e2e.sh
 ```
 
