@@ -208,7 +208,11 @@ Duplicates are judged by CONTENT, not filename (the first surviving line):
 candidate contained in an existing raw, not copied; candidate larger, copied
 under its new id and the old file kept. Small and duplicate drops get a
 DETERMINISTIC skip line in `<project>/log.md`, "never skip in silence" is a
-script guarantee now. The result is one commit: `chore: raw capture`.
+script guarantee now. A session already captured that was resumed later
+(same id, new messages) is not dropped as present: the part no earlier copy
+holds, when it carries model work, is copied as `<id>_cont<N>.jsonl`, the
+existing raw untouched, and its worker extends the existing source page.
+The result is one commit: `chore: raw capture`.
 
 State is not kept in a separate file, THE VAULT ITSELF IS THE STATE:
 - captured = `<project>/raw/sessions/<id>.jsonl` exists

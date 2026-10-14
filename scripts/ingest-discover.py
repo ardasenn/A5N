@@ -53,16 +53,32 @@ conversation. Candidate contained in existing: redundant, skip line.
 Candidate larger: copied under its new id, the old file is NOT deleted
 (hard rule 1, pruning redundant raws is the user's call), noted in the log.
 
+A session already in the vault can keep growing: the user resumes
+yesterday's conversation the next morning, or a worktree session goes on
+under the main project folder with the same id. The first version called
+every such candidate "present" and the continuation never reached the
+vault; on 2026-10-06 one machine held 18 sessions, about 100 user messages,
+lost that way. Now the part no earlier copy holds is copied as a new raw,
+<id>_cont<N>.jsonl, and only when it carries model work: a resumed session
+also appends mode and title records that are not worth a unit. The
+existing raw is never touched (hard rule 1), so the base and its parts in
+order hold the whole filtered conversation. The separator is "_" on
+purpose: a word character, so the "skip | <id>\b" trace of a part can
+never match its base id, and "raw/sessions/<id>.jsonl" is not a substring
+of a part's path either.
+
 queue prints unprocessed raws as TSV (project, id, raw path, bytes, date),
 oldest session first, capped by limits.max_units (env A5N_MAX_UNITS
 overrides). Totals go to stderr.
 
 Known accepted blind spot: a session skipped as "too small" whose transcript
 later grows will not become a candidate again, its id is already in the
-namespace. The freshness window makes this rare in practice.
+namespace and it has no raw to continue. The freshness window makes this
+rare in practice.
 """
 import datetime
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -87,6 +103,8 @@ _it = _import("import_transcript", "import-transcript.py")
 _tm = _import("transcript_meta", "transcript-meta.py")
 
 TS_RX = re.compile(r'"timestamp"\s*:\s*"(\d{4}-\d{2}-\d{2})')
+TS_FULL_RX = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
+CONT_SEP = "_cont"
 
 
 def filtered_lines(path):
@@ -120,6 +138,94 @@ def relation(candidate, existing):
             if cline != eline:
                 return "divergent"
     return "superset" if next(cg, None) is not None else "subset"
+
+
+def last_timestamp(path, tail=262144):
+    """Newest record timestamp near the end of a transcript, "" if none.
+
+    Only a cheap gate in front of new_part: almost no present session ever
+    grows, and reading each of them in full on every run costs time for
+    nothing."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - tail))
+        data = f.read().decode("utf-8", "replace")
+    found = TS_FULL_RX.findall(data)
+    return max(found) if found else ""
+
+
+def record_id(line):
+    """A Claude Code record's uuid, None for any other line."""
+    if '"uuid"' not in line:
+        return None
+    try:
+        rid = json.loads(line).get("uuid")
+    except (ValueError, AttributeError):
+        return None
+    return rid if isinstance(rid, str) else None
+
+
+def is_model_work(line):
+    """A record of the model answering or acting: a Claude Code assistant
+    record, or a Codex response_item that is not a user or developer
+    message. A resumed session also appends mode, title and queue records,
+    and a tail of only those is not worth a model run (8 of 21 grown
+    sessions on 2026-10-14 were exactly that)."""
+    try:
+        d = json.loads(line)
+    except ValueError:
+        return False
+    if not isinstance(d, dict):
+        return False
+    if d.get("type") == "assistant":
+        return True
+    if d.get("type") == "response_item":
+        p = d.get("payload")
+        return isinstance(p, dict) and p.get("role") not in (
+            "user", "developer", "system")
+    return False
+
+
+def new_part(src, parts):
+    """Filtered source lines that no earlier copy holds, in source order.
+
+    Membership, not a lockstep walk like relation(): copies taken before the
+    import filter existed still carry hook records, and a lockstep walk
+    calls every such session divergent (two real cases on 2026-10-14). A
+    Claude Code record is known by its uuid, any other line by its text."""
+    seen_lines, seen_ids = set(), set()
+    for p in parts:
+        with open(p, errors="replace") as f:
+            for line in f:
+                seen_lines.add(line.rstrip("\r\n"))
+                rid = record_id(line)
+                if rid:
+                    seen_ids.add(rid)
+    out = []
+    for line in filtered_lines(src):
+        if line.rstrip("\r\n") in seen_lines:
+            continue
+        rid = record_id(line)
+        if rid and rid in seen_ids:
+            continue
+        out.append(line)
+    return out
+
+
+def write_part(lines, dst):
+    """Write a continuation raw the way import-transcript writes a raw:
+    through a .partial file, never over an existing file."""
+    if os.path.exists(dst):
+        sys.exit(f"error: continuation target already exists: {dst}")
+    tmp = dst + ".partial"
+    try:
+        with open(tmp, "w") as f:
+            f.writelines(lines)
+        os.replace(tmp, dst)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 def session_date(path):
@@ -221,11 +327,34 @@ def capture(cfg, dry):
     now = datetime.datetime.now().timestamp()
     fresh_sec = float(cfg["limits"]["settle_hours"]) * 3600
     min_bytes = int(cfg["limits"]["min_session_kb"]) * 1024
+    # "copied" stays the first key, setup.sh reads it as the number of new
+    # raws waiting for a unit; a continuation is one of them and is also
+    # counted under "continued".
     counts = {"copied": 0, "watermark": 0, "fresh": 0, "present": 0,
-              "small": 0, "redundant": 0, "larger": 0, "divergent": 0}
+              "small": 0, "redundant": 0, "larger": 0, "divergent": 0,
+              "continued": 0}
 
     # project -> {first line: [raw path, ...]}, built lazily
     fl_index, trace_cache = {}, {}
+    # project -> {target stem: [(part number, raw path), ...]}, the base
+    # raw is part 0, built lazily
+    parts_index = {}
+
+    def parts_of(proj, stem):
+        if proj not in parts_index:
+            idx = {}
+            rdir = os.path.join(vault, proj, "raw", "sessions")
+            if os.path.isdir(rdir):
+                for fn in os.listdir(rdir):
+                    if not fn.endswith(".jsonl"):
+                        continue
+                    s = fn[:-len(".jsonl")]
+                    base, sep, n = s.rpartition(CONT_SEP)
+                    key, num = (base, int(n)) if sep and n.isdigit() else (s, 0)
+                    idx.setdefault(key, []).append(
+                        (num, os.path.join(rdir, fn)))
+            parts_index[proj] = idx
+        return parts_index[proj].setdefault(stem, [])
 
     def index_of(proj):
         if proj not in fl_index:
@@ -263,6 +392,45 @@ def capture(cfg, dry):
             continue
 
         dst = os.path.join(vault, name, "raw", "sessions", target)
+        stem = os.path.splitext(target)[0]
+        parts = parts_of(name, stem)
+        if parts:
+            parts.sort()
+            paths = [p for _, p in parts]
+            src_ts = last_timestamp(src)
+            if src_ts and src_ts <= max(last_timestamp(p) for p in paths):
+                counts["present"] += 1
+                continue
+            part = new_part(src, paths)
+            if not any(is_model_work(line) for line in part):
+                counts["present"] += 1
+                continue
+            n = parts[-1][0] + 1
+            cont_id = f"{stem}{CONT_SEP}{n}"
+            cdst = os.path.join(vault, name, "raw", "sessions",
+                                cont_id + ".jsonl")
+            counts["copied"] += 1
+            counts["continued"] += 1
+            if dry:
+                print(f"[dry-run] would copy continuation: {name}/{cont_id} "
+                      f"({len(part)} new lines)")
+                # a second folder holding the same id must compare against
+                # this part too, as in the real run
+                parts.append((n, src))
+                continue
+            write_part(part, cdst)
+            parts.append((n, cdst))
+            print(f"{cont_id}.jsonl: continuation of a captured session, "
+                  f"{len(part)} new lines, "
+                  f"{os.path.getsize(cdst) / 1048576.0:.1f} MB")
+            # ids truncated, as in every note: see the comment further down
+            append_skip(vault, name,
+                        f"note | {sid[:8]}… grew after it was captured, the "
+                        f"new part copied as {sid[:8]}…{CONT_SEP}{n}", dry)
+            continue
+        # dst can only exist here if the parts index missed it; present is
+        # the safe answer, a dedup pass would write a "skip | <id>" line and
+        # that line would dequeue the very raw that holds this session
         if os.path.exists(dst) or is_processed(traces_of(name), sid):
             counts["present"] += 1
             continue
@@ -316,6 +484,7 @@ def capture(cfg, dry):
             # waiting" overstates the model runs it is asking to approve
             if fl is not None:
                 index_of(name).setdefault(fl, []).append(src)
+            parts.append((0, src))
             continue
         r = subprocess.run(
             [sys.executable, os.path.join(SCRIPTS_DIR, "import-transcript.py"),
@@ -330,6 +499,9 @@ def capture(cfg, dry):
         counts["copied"] += 1
         if fl is not None:
             index_of(name).setdefault(fl, []).append(dst)
+        # the same id may still come from a second folder in this run, and
+        # it must meet this raw as its base, not as a "larger" new id
+        parts.append((0, dst))
 
     print("capture summary: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
 

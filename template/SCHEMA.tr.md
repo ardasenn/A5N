@@ -203,8 +203,12 @@ vault içi yolu gösterir.
 Kopya ölçütü dosya adı değil İÇERİKTİR (süzülmüş ilk satır): aday mevcut bir
 raw'ın içindeyse kopyalanmaz; aday daha genişse yeni kimliğiyle kopyalanır,
 eskisi silinmez. Küçük ve kopya elemeleri `<proje>/log.md`'ye DETERMİNİSTİK
-skip satırı düşer, "sessizce atlama yasak" artık script garantisidir. Sonuç
-tek commit: `chore: raw capture`.
+skip satırı düşer, "sessizce atlama yasak" artık script garantisidir. Daha
+önce yakalanmış ve sonra devam ettirilmiş bir oturum (aynı kimlik, yeni
+mesajlar) "zaten var" diye atlanmaz: önceki kopyaların hiçbirinde olmayan
+kısım, içinde model işi varsa, `<id>_cont<N>.jsonl` olarak kopyalanır, mevcut
+ham dosyaya dokunulmaz, işçisi mevcut kaynak sayfasını genişletir. Sonuç tek
+commit: `chore: raw capture`.
 
 State ayrı dosyada tutulmaz, VAULT'UN KENDİSİ STATE'TİR:
 - yakalandı = `<proje>/raw/sessions/<id>.jsonl` mevcut
