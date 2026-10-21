@@ -44,8 +44,9 @@ goals, planned moves, priority arguments. It is the mirror image of the rest
 of the vault. The wiki looks backwards and records evidence, chess moves look
 forwards and record intent.
 
-* Written only with you, on an explicit request. The scheduled ingest never
-  writes here.
+* Written only with you, on an explicit request: in an interactive session,
+  or by an agent through the MCP server's `vault_save_chess_move` (a profile
+  with `allow_write = chess-moves`). The scheduled ingest never writes here.
 * Old session files are never edited. A new one is written instead, so dated
   snapshots keep the evolution of your thinking visible.
 * Readable during a query. When the question is whether some work serves the
@@ -56,7 +57,9 @@ forwards and record intent.
 `GOALS.md` is the always current, single file summary of your goals and where
 things stand. Chess moves are the negotiation, GOALS.md is the outcome, so
 updating it at the end of a chess moves session is the natural flow. Written
-only from what you state. The scheduled jobs never touch it.
+only from what you state, by hand or through the MCP server's
+`vault_update_goals` (`allow_write = goals`). The scheduled jobs never touch
+it.
 
 Root `index.md` and `log.md` stay short no matter how many projects you have.
 Detail lives in `<project>/index.md` and `<project>/log.md`.

@@ -278,6 +278,15 @@ def mcp_profile(cfg, name):
     if section is None:
         raise ConfigError(
             f"--profile {name}: config.ini has no [mcp:{name}] section")
+    writes = {t.strip().lower() for t in
+              section.get("allow_write", "").split(",") if t.strip()}
+    unknown = writes - MCP_WRITE_TARGETS
+    if unknown:
+        # closed list: "allow_write = goal" silently granting nothing would
+        # leave the user believing the agent can save what it cannot
+        raise ConfigError(
+            f"[mcp:{name}] allow_write has '{', '.join(sorted(unknown))}', "
+            f"must be from: {', '.join(sorted(MCP_WRITE_TARGETS))}")
     return {
         "name": name,
         "hide_tags": {t.strip().lower() for t in
@@ -285,7 +294,13 @@ def mcp_profile(cfg, name):
         "hide_projects": {t.strip() for t in
                           section.get("hide_projects", "").split(",")
                           if t.strip()},
+        "allow_write": writes,
     }
+
+
+# The only places an MCP client may ever write: the two the scheduled jobs
+# never touch, so a client and the ingest can never write the same file.
+MCP_WRITE_TARGETS = {"chess-moves", "goals"}
 
 
 def projects(cfg=None):
@@ -417,7 +432,8 @@ def main(argv):
             prof = mcp_profile(cfg, section.split(":", 1)[1])
             print(f"mcp profile {prof['name']}: hides tags "
                   f"{', '.join(sorted(prof['hide_tags'])) or '-'}, projects "
-                  f"{', '.join(sorted(prof['hide_projects'])) or '-'}")
+                  f"{', '.join(sorted(prof['hide_projects'])) or '-'}; writes "
+                  f"{', '.join(sorted(prof['allow_write'])) or '-'}")
         stale = [k for k in ("claude_bin", "model") if k in cfg["agents"]]
         if "run_timeout" in cfg["limits"]:
             stale.append("run_timeout")
