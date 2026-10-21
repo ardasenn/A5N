@@ -235,7 +235,8 @@ command = "python3"
 args = ["/path/to/A5N/scripts/a5n-mcp.py"]
 ```
 
-The server is read only and never opens `raw/`. It does its own ranking, so
+The server is read only, apart from two write tools a profile can opt
+into (below), and never opens `raw/`. It does its own ranking, so
 a query adds no model cost. `setup.sh` prints these commands with the real
 paths filled in.
 
@@ -258,7 +259,14 @@ A client that should see less gets a profile. A `[mcp:assistant]` section
 with `hide_tags = security` and a client started with
 `a5n-mcp.py --profile assistant` never sees a page tagged `security`, nor
 any line of another page that names one, so an index entry cannot give the
-hidden page away. The filter runs in the server, on your machine. It covers
+hidden page away. A profile with `allow_write = chess-moves, goals` also
+gets two write tools: one saves a strategy conversation as a new dated
+chess moves session, the other replaces `GOALS.md`. Those are the two pages
+no scheduled job writes, so the client and the ingest never share a file.
+The server applies the page format and the masking, refuses while a job
+runs on the machine (a rolled back unit would take the file with it),
+never edits an older session, and commits and pushes each write on its own.
+The filter runs in the server, on your machine. It covers
 only what goes through the server: an agent that also has a shell or file
 tools on the same machine can still read the vault files, so run such an
 agent in a sandbox that does not mount the vault.

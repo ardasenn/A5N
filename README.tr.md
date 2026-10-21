@@ -239,7 +239,8 @@ command = "python3"
 args = ["/path/to/A5N/scripts/a5n-mcp.py"]
 ```
 
-Server salt okunurdur ve `raw/` altını asla açmaz. Sıralamayı kendi yaptığı
+Server salt okunurdur (bir profilin açıkça istediği iki yazma aracı hariç,
+aşağıda) ve `raw/` altını asla açmaz. Sıralamayı kendi yaptığı
 için bir sorgunun ekstra model maliyeti yoktur. `setup.sh` bu komutları
 gerçek yollarla doldurup basar.
 
@@ -263,7 +264,14 @@ Daha azını görmesi gereken istemciye profil verilir. `hide_tags = security`
 içeren bir `[mcp:assistant]` bölümü ve `a5n-mcp.py --profile assistant` ile
 başlatılan bir istemci, `security` etiketli hiçbir sayfayı ve başka
 sayfalarda onu anan hiçbir satırı görmez, yani bir index girdisi gizli
-sayfayı ele veremez. Süzme server'da, senin makinende yapılır. Yalnızca
+sayfayı ele veremez. `allow_write = chess-moves, goals` içeren bir profil
+iki yazma aracı da alır: biri stratejik bir konuşmayı yeni, tarihli bir
+chess moves oturumu olarak kaydeder, diğeri `GOALS.md`'yi yeniden yazar.
+Bunlar hiçbir zamanlanmış işin yazmadığı iki sayfa, yani istemci ile ingest
+asla aynı dosyaya yazmaz. Server sayfa biçimini ve maskelemeyi uygular,
+makinede bir iş koşarken yazmayı reddeder (geri alınan bir birim dosyayı da
+götürürdü), eski bir oturumu asla değiştirmez, her yazmayı ayrı commit
+edip push eder. Süzme server'da, senin makinende yapılır. Yalnızca
 server'dan geçeni kapsar: aynı makinede kabuğu ya da dosya araçları olan bir
 ajan vault dosyalarını yine okuyabilir, böyle bir ajanı vault'u bağlamayan
 bir sandbox'ta çalıştır.

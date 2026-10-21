@@ -47,7 +47,9 @@ tutar: hedefler, hamle planları, öncelik tartışmaları. Vault'un geri kalan�
 aynadaki tersidir. Wiki geriye bakar ve kanıt kaydeder, chess moves ileriye
 bakar ve niyet kaydeder.
 
-* Sadece kullanıcıyla birlikte, açık istek üzerine yazılır. Zamanlanmış ingest
+* Sadece kullanıcıyla birlikte, açık istek üzerine yazılır: interaktif bir
+  oturumda ya da bir ajan tarafından MCP server'ın `vault_save_chess_move`
+  aracıyla (`allow_write = chess-moves` olan bir profil). Zamanlanmış ingest
   buraya asla yazmaz.
 * Eski oturum dosyaları güncellenmez, yenisi yazılır. Tarihli snapshot'lar
   düşüncenin evrimini görünür kılar.
@@ -58,7 +60,8 @@ bakar ve niyet kaydeder.
 
 `GOALS.md` hedeflerin ve mevcut durumun hep güncel tek dosya özetidir. Chess
 moves müzakere, GOALS.md sonuçtur, dolayısıyla bir chess moves oturumunun
-sonunda güncellenmesi doğal akıştır. Sadece kullanıcı beyanıyla yazılır.
+sonunda güncellenmesi doğal akıştır. Sadece kullanıcı beyanıyla yazılır, elle
+ya da MCP server'ın `vault_update_goals` aracıyla (`allow_write = goals`).
 Zamanlanmış görevler asla dokunmaz.
 
 Kök `index.md` ve `log.md` proje sayısı büyüse de kısa kalır. Detay

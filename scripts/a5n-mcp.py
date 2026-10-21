@@ -38,15 +38,21 @@ tool) needs that access taken away on its own side.
 Implementation notes. Standard library only, like the rest of A5N: the MCP
 stdio transport is newline delimited JSON-RPC 2.0, which needs no SDK.
 stdout carries protocol messages and nothing else; diagnostics go to
-stderr. The server is strictly read only and never opens anything under
-raw/: transcripts are data for the ingest, not for queries, and they are
-large enough to flood an agent's context.
+stderr. The server is read only and never opens anything under raw/:
+transcripts are data for the ingest, not for queries, and they are large
+enough to flood an agent's context. The one exception to read only is
+opt in per profile (allow_write): saving a chess moves session and
+replacing GOALS.md, the two pages no scheduled job writes. scripts/
+vault_write.py says why exactly those and how a write stays out of a
+running job's way.
 
 Tools:
     vault_overview()                 orientation: namespaces, counts, patterns
     vault_search(query, project?, limit?)   ranked term search over pages
     vault_list(path?, limit?, offset?)      the pages of one folder, newest first
     vault_page(path, start_line?)    one page; a long one comes in parts
+    vault_save_chess_move(title, body, slug?, tags?)  allow_write chess-moves
+    vault_update_goals(body, summary)                 allow_write goals
 
 Why paging and listing exist: a page used to be cut at PAGE_CAP with no way
 to read on, and an append only log keeps its newest entries at the end, so
@@ -64,6 +70,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import load, mcp_profile, ConfigError  # noqa: E402
 import privacy  # noqa: E402
+import vault_write  # noqa: E402
 
 PROTOCOL_VERSION = "2025-06-18"
 SKIP_DIRS = {".git", ".obsidian", ".a5n-logs", "raw", ".claude", "node_modules"}
@@ -167,6 +174,61 @@ TOOLS = [
         },
     },
 ]
+
+# Listed only to a profile whose allow_write names them; to everyone else
+# they do not exist, and a call is refused as an unknown tool.
+WRITE_TOOLS = {
+    "chess-moves": {
+        "name": "vault_save_chess_move",
+        "description": (
+            "Save a strategy conversation with the user as a new chess moves "
+            "session: their goals, the moves planned, the priorities argued. "
+            "Call it only when the user asks for the conversation to be "
+            "saved. It becomes chess-moves/<today>-<slug>.md; an older "
+            "session is never edited, each save is a new dated snapshot. "
+            "Write the body in the vault's language as a readable summary "
+            "of what was decided and why, not a transcript. Frontmatter, "
+            "masking of personal data and the commit are done for you."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string",
+                          "description": "Short title of the session."},
+                "body": {"type": "string",
+                         "description": "Markdown page body, without frontmatter."},
+                "slug": {"type": "string",
+                         "description": "Optional kebab case name; made from the title when left out."},
+                "tags": {"type": "array", "items": {"type": "string"},
+                         "description": "Optional extra tags; chess-moves is always added."},
+            },
+            "required": ["title", "body"],
+        },
+    },
+    "goals": {
+        "name": "vault_update_goals",
+        "description": (
+            "Replace GOALS.md, the always current summary of the user's "
+            "goals, with new content. Only from what the user states, and "
+            "only after they approved the new text. Read the current "
+            "GOALS.md with vault_page first and send the COMPLETE new body: "
+            "whatever the body leaves out is gone from the file (the old "
+            "version stays in git history). Usually called at the end of "
+            "a chess moves session, after vault_save_chess_move."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "body": {"type": "string",
+                         "description": "The whole new page body, without frontmatter."},
+                "summary": {"type": "string",
+                            "description": "One line: what changed and why."},
+            },
+            "required": ["body", "summary"],
+        },
+    },
+}
+WRITE_TOOL_TARGET = {t["name"]: target for target, t in WRITE_TOOLS.items()}
 
 
 def log(msg):
@@ -488,7 +550,9 @@ def tool_result(text, is_error=False):
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
-def handle(vault, pol, prof, method, params):
+def handle(cfg, pol, prof, method, params):
+    vault = cfg["vault"]["path"]
+    writes = prof["allow_write"] if prof else set()
     if method == "initialize":
         return {
             "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
@@ -498,7 +562,7 @@ def handle(vault, pol, prof, method, params):
     if method == "ping":
         return {}
     if method == "tools/list":
-        return {"tools": TOOLS}
+        return {"tools": TOOLS + [WRITE_TOOLS[t] for t in sorted(writes)]}
     if method == "tools/call":
         name = params.get("name")
         args = params.get("arguments") or {}
@@ -517,6 +581,19 @@ def handle(vault, pol, prof, method, params):
             text, err = do_page(vault, view, args.get("path", ""),
                                 args.get("start_line", 1))
             return tool_result(err, True) if err else tool_result(text)
+        target = WRITE_TOOL_TARGET.get(name)
+        if target in writes:
+            try:
+                if target == "chess-moves":
+                    return tool_result(vault_write.save_chess_move(
+                        vault, cfg, pol, prof["name"], args.get("title", ""),
+                        args.get("slug", ""), args.get("body", ""),
+                        args.get("tags") or []))
+                return tool_result(vault_write.update_goals(
+                    vault, cfg, pol, prof["name"], args.get("body", ""),
+                    args.get("summary", "")))
+            except vault_write.WriteError as exc:
+                return tool_result(str(exc), True)
         return tool_result(f"unknown tool: {name}", True)
     return None  # unknown method
 
@@ -540,6 +617,8 @@ def main(argv):
         return 1
     log(f"serving vault {vault}"
         + (f", profile {prof['name']}" if prof else "")
+        + (f", may write {', '.join(sorted(prof['allow_write']))}"
+           if prof and prof["allow_write"] else "")
         + (", personal data masked" if pol["enabled"] else ""))
 
     for line in sys.stdin:
@@ -556,7 +635,7 @@ def main(argv):
         if msg_id is None:
             continue  # notification: never answered
         try:
-            result = handle(vault, pol, prof, method, msg.get("params") or {})
+            result = handle(cfg, pol, prof, method, msg.get("params") or {})
         except Exception as exc:  # a tool bug must not kill the transport
             log(f"error in {method}: {exc}")
             reply = {"jsonrpc": "2.0", "id": msg_id,
