@@ -225,7 +225,7 @@ sana söyler.
 
 Sayfa yazmak işin yarısı: ajanların onları okuyabilmesi de gerek. A5N bunun
 için bir MCP server ile gelir; MCP destekli her ajan vault'ta arama yapabilir,
-genel görünümü alabilir ve sayfaları okuyabilir. Makine başına bir kez
+genel görünümü alabilir, klasörleri listeleyebilir ve sayfaları okuyabilir. Makine başına bir kez
 kaydet, her ajan oturumu geçmişini tekrarlamadan önce vault'a baksın:
 
 ```bash
@@ -242,6 +242,14 @@ args = ["/path/to/A5N/scripts/a5n-mcp.py"]
 Server salt okunurdur ve `raw/` altını asla açmaz. Sıralamayı kendi yaptığı
 için bir sorgunun ekstra model maliyeti yoktur. `setup.sh` bu komutları
 gerçek yollarla doldurup basar.
+
+Her sayfanın tamamına ulaşılır. 100 KB'tan uzun bir sayfa, özellikle sonuna
+eklenen bir log, parça parça gelir: her parça bir sonrakinin `start_line`
+değeriyle biter, negatif bir `start_line` ise logun en yeni kayıtlarını
+tuttuğu sondan okur. `vault_list` bir klasörün sayfalarını en yeniden
+başlayarak başlık, tarih ve durumla gösterir. Bunlar olmazsa ajan kesilen
+yere takılır, kabuğu olan bir ajan da dosyayı doğrudan okur ve aşağıdaki
+bütün süzgeçleri atlar.
 
 Kişisel veri dönen cevaba girmez. Varsayılan `[privacy] mask = yes` ile
 e-posta adresleri, telefon numaraları, kimlik ve vergi numaraları her sayfada
