@@ -221,7 +221,7 @@ tells you.
 
 Writing pages is only half the job: your agents also need to read them. A5N
 ships an MCP server that gives any MCP capable agent read access to the vault,
-with search, an overview, and full page reads. Register it once per machine
+with search, an overview, folder listings and page reads. Register it once per machine
 and every agent session can check the vault before repeating your history:
 
 ```bash
@@ -238,6 +238,13 @@ args = ["/path/to/A5N/scripts/a5n-mcp.py"]
 The server is read only and never opens `raw/`. It does its own ranking, so
 a query adds no model cost. `setup.sh` prints these commands with the real
 paths filled in.
+
+Every page is reachable in full. A page over 100 KB, an append only log
+above all, comes in parts: each part ends with the `start_line` of the
+next, and a negative `start_line` reads from the end, where a log keeps
+its newest entries. `vault_list` shows a folder's pages newest first, with
+title, date and status. Without these an agent hits the cut, and one that
+has a shell reads the file directly instead, around every filter below.
 
 Personal data stays out of what it returns. With `[privacy] mask = yes`, the
 default, e-mail addresses, phone numbers, national id and tax numbers are

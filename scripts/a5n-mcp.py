@@ -45,7 +45,15 @@ large enough to flood an agent's context.
 Tools:
     vault_overview()                 orientation: namespaces, counts, patterns
     vault_search(query, project?, limit?)   ranked term search over pages
-    vault_page(path)                 one page, full content
+    vault_list(path?, limit?, offset?)      the pages of one folder, newest first
+    vault_page(path, start_line?)    one page; a long one comes in parts
+
+Why paging and listing exist: a page used to be cut at PAGE_CAP with no way
+to read on, and an append only log keeps its newest entries at the end, so
+the cut removed exactly the part a "what happened lately" question needs.
+An agent that also has a shell then reads the file directly, around every
+filter this server applies. Everything the vault holds as pages has to be
+reachable through the server, or the server is not the read path.
 """
 import datetime
 import json
@@ -61,6 +69,8 @@ PROTOCOL_VERSION = "2025-06-18"
 SKIP_DIRS = {".git", ".obsidian", ".a5n-logs", "raw", ".claude", "node_modules"}
 EXCERPT_CHARS = 160
 PAGE_CAP = 100 * 1024
+LIST_DEFAULT = 200
+LIST_CAP = 1000
 
 TOOLS = [
     {
@@ -68,7 +78,8 @@ TOOLS = [
         "description": (
             "Orientation for the knowledge vault: the project namespaces with "
             "their page counts, the cross project pattern pages, and the root "
-            "index. Call this first to learn what the vault knows about."
+            "index. Call this first to learn what the vault knows about, "
+            "then vault_list to browse a folder."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -100,10 +111,42 @@ TOOLS = [
         },
     },
     {
+        "name": "vault_list",
+        "description": (
+            "List the pages of one vault folder, newest first, with title, "
+            "date and status, plus its subfolders. Use it to browse: all "
+            "decisions or bugs of a project, the pattern pages, the "
+            "strategy notes. Empty path lists the vault root."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Vault relative folder, for example "
+                        "'<project>/decisions' or 'patterns'. Empty for "
+                        "the root."),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": f"Pages to return, default {LIST_DEFAULT}, cap {LIST_CAP}.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Pages to skip, for the next part of a long folder.",
+                },
+            },
+        },
+    },
+    {
         "name": "vault_page",
         "description": (
-            "Read one vault page in full. The path is vault relative, as "
-            "returned by vault_search or vault_overview."
+            "Read one vault page. The path is vault relative, as returned by "
+            "vault_search, vault_list or vault_overview. A page longer than "
+            f"{PAGE_CAP // 1024} KB comes in parts; each part ends with the "
+            "start_line of the next one. Logs keep their newest entries at "
+            "the end: a negative start_line reads from there."
         ),
         "inputSchema": {
             "type": "object",
@@ -111,7 +154,14 @@ TOOLS = [
                 "path": {
                     "type": "string",
                     "description": "Vault relative path of a .md page.",
-                }
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": (
+                        "First line to return, 1 based, default 1. A "
+                        "negative number counts from the end: -200 starts "
+                        "at the 200th line from the end."),
+                },
             },
             "required": ["path"],
         },
@@ -300,7 +350,7 @@ def do_search(vault, view, query, project, limit):
     return "\n".join(out)
 
 
-def do_page(vault, view, path):
+def do_page(vault, view, path, start_line=1):
     if not path or path.startswith(("/", "~")) or ".." in path.split("/"):
         return None, "path must be vault relative, without .. segments"
     if not path.endswith(".md"):
@@ -316,10 +366,88 @@ def do_page(vault, view, path):
     rel = os.path.relpath(ap, os.path.realpath(vault))
     if not view.visible(rel):
         return None, f"not available to this client: {path}"
-    text = view.render(read_text(ap))
-    if len(text) > PAGE_CAP:
-        text = text[:PAGE_CAP] + f"\n\n[truncated at {PAGE_CAP // 1024} KB]"
+    try:
+        start = int(start_line or 1)
+    except (TypeError, ValueError):
+        return None, f"start_line must be a whole number, got: {start_line}"
+    # Lines of the page as this client sees it: hidden lines are already
+    # gone, so the numbers stay consistent from one part to the next.
+    lines = view.render(read_text(ap)).split("\n")
+    if len(lines) > 1 and lines[-1] == "":
+        lines.pop()  # the file's final newline ends a line, it is not one
+    total = len(lines)
+    if start < 0:
+        start = max(1, total + start + 1)
+    start = max(start, 1)
+    if start > total:
+        return None, f"start_line {start} is past the end, the page has {total} lines"
+    out, size, end = [], 0, start - 1
+    while end < total:
+        need = len(lines[end].encode("utf-8")) + 1
+        if out and size + need > PAGE_CAP:
+            break
+        out.append(lines[end])
+        size += need
+        end += 1
+    text = "\n".join(out)
+    if start > 1 or end < total:
+        note = f"[lines {start}-{end} of {total}"
+        if end < total:
+            note += f"; the page goes on, call vault_page with start_line={end + 1}"
+        text += "\n\n" + note + "]"
     return text, None
+
+
+def do_list(vault, view, path, limit, offset):
+    path = (path or "").strip().strip("/")
+    parts = path.split("/") if path else []
+    if path.startswith("~") or os.path.isabs(path) or ".." in parts:
+        return "path must be vault relative, without .. segments"
+    if any(p in SKIP_DIRS or p.startswith(".") for p in parts):
+        return f"not a folder of pages: {path}"
+    root = os.path.realpath(vault)
+    ap = os.path.realpath(os.path.join(vault, path))
+    if ap != root and not ap.startswith(root + os.sep):
+        return "path resolves outside the vault"
+    if not os.path.isdir(ap) or (parts and parts[0] in view.hidden_ns):
+        return f"no such folder in the vault: {path}"
+    try:
+        limit = max(1, min(int(limit or LIST_DEFAULT), LIST_CAP))
+        offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        return "limit and offset must be whole numbers"
+
+    folders, pages = [], []
+    for entry in sorted(os.listdir(ap)):
+        full = os.path.join(ap, entry)
+        if os.path.isdir(full):
+            if (entry not in SKIP_DIRS and not entry.startswith(".")
+                    and not (not parts and entry in view.hidden_ns)):
+                folders.append(entry)
+        elif entry.endswith(".md"):
+            rel = f"{path}/{entry}" if path else entry
+            if view.visible(rel):
+                title, status, date = page_meta(read_head(full))
+                pages.append((date, rel, title, status))
+    # newest first; undated pages (indexes, schema) after the dated ones
+    pages.sort(key=lambda p: (p[0] or "0000", p[1]), reverse=True)
+
+    where = path or "vault root"
+    shown = pages[offset:offset + limit]
+    out = [f"{where}: {len(pages)} pages, newest first"
+           + (f", showing {offset + 1}-{offset + len(shown)}" if shown else "")]
+    if folders:
+        out.append("Folders: " + ", ".join(f"{path}/{f}" if path else f
+                                           for f in folders))
+    for date, rel, title, status in shown:
+        meta = " | ".join(x for x in (title, date, status) if x)
+        out.append(f"- {rel}" + (f" | {meta}" if meta else ""))
+    if offset + len(shown) < len(pages):
+        out.append(f"[{len(pages) - offset - len(shown)} more: call vault_list "
+                   f"with offset={offset + len(shown)}]")
+    # titles go through the same filter as page text: masked, and a line
+    # that names a hidden page is dropped
+    return view.render("\n".join(out))
 
 
 def do_overview(vault, view):
@@ -381,8 +509,13 @@ def handle(vault, pol, prof, method, params):
             return tool_result(do_search(
                 vault, view, args.get("query", ""), args.get("project", ""),
                 args.get("limit", 10)))
+        if name == "vault_list":
+            return tool_result(do_list(
+                vault, view, args.get("path", ""), args.get("limit"),
+                args.get("offset")))
         if name == "vault_page":
-            text, err = do_page(vault, view, args.get("path", ""))
+            text, err = do_page(vault, view, args.get("path", ""),
+                                args.get("start_line", 1))
             return tool_result(err, True) if err else tool_result(text)
         return tool_result(f"unknown tool: {name}", True)
     return None  # unknown method
