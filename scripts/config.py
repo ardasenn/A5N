@@ -58,6 +58,12 @@ DEFAULTS = {
         "lock": "yes",
         "offline_after": "900",
     },
+    "privacy": {
+        "mask": "yes",
+        "keep_emails": "",
+        "keep_domains": "",
+        "keep_phones": "",
+    },
 }
 
 
@@ -104,6 +110,7 @@ def load(path=None):
     _validate_schedule(cfg["schedule"])
     _validate_sync(cfg["sync"])
     _validate_limits(cfg["limits"])
+    cfg["privacy"]["mask"] = _yes_no("privacy.mask", cfg["privacy"]["mask"])
 
     cfg["_projects"] = _projects(parser)
     cfg["_config_path"] = str(path)
@@ -261,6 +268,26 @@ def _projects(parser):
     return out
 
 
+def mcp_profile(cfg, name):
+    """The [mcp:<name>] section an MCP client asked for with --profile.
+
+    A missing section is an error, not an empty profile: a typo in the
+    client's registration would otherwise serve everything the profile was
+    written to hide, and nobody would notice."""
+    section = cfg.get(f"mcp:{name}")
+    if section is None:
+        raise ConfigError(
+            f"--profile {name}: config.ini has no [mcp:{name}] section")
+    return {
+        "name": name,
+        "hide_tags": {t.strip().lower() for t in
+                      section.get("hide_tags", "").split(",") if t.strip()},
+        "hide_projects": {t.strip() for t in
+                          section.get("hide_projects", "").split(",")
+                          if t.strip()},
+    }
+
+
 def projects(cfg=None):
     return (cfg or load())["_projects"]
 
@@ -304,6 +331,7 @@ def _emit_shell(cfg):
         "A5N_SYNC_RAW_REMOTE": cfg["sync"]["raw_remote"],
         "A5N_SYNC_LOCK": cfg["sync"]["lock"],
         "A5N_SYNC_OFFLINE_AFTER": cfg["sync"]["offline_after"],
+        "A5N_PRIVACY_MASK": cfg["privacy"]["mask"],
         "A5N_MIN_SESSION_KB": cfg["limits"]["min_session_kb"],
         "A5N_SETTLE_HOURS": cfg["limits"]["settle_hours"],
         "A5N_UNIT_TIMEOUT": cfg["limits"]["unit_timeout"],
@@ -384,6 +412,12 @@ def main(argv):
                   f"offline after {sync['offline_after']}s")
         else:
             print("sync: off")
+        print(f"privacy: masking {'on' if cfg['privacy']['mask'] == 'yes' else 'off'}")
+        for section in sorted(k for k in cfg if k.startswith("mcp:")):
+            prof = mcp_profile(cfg, section.split(":", 1)[1])
+            print(f"mcp profile {prof['name']}: hides tags "
+                  f"{', '.join(sorted(prof['hide_tags'])) or '-'}, projects "
+                  f"{', '.join(sorted(prof['hide_projects'])) or '-'}")
         stale = [k for k in ("claude_bin", "model") if k in cfg["agents"]]
         if "run_timeout" in cfg["limits"]:
             stale.append("run_timeout")

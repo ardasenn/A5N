@@ -270,12 +270,16 @@ while IFS=$'\t' read -r PROJ SID RAWP SIZE SDATE; do
     fi
   fi
 
-  PROMPT="$(python3 - "$UNIT_PROMPT_FILE" "$PROJ" "$SID" "$RAWP" "$READP" "$SDATE" "$A5N_LANGUAGE" <<'PYEOF'
-import sys
+  PROMPT="$(python3 - "$UNIT_PROMPT_FILE" "$PROJ" "$SID" "$RAWP" "$READP" "$SDATE" "$A5N_LANGUAGE" "$A5N_PRIVACY_MASK" <<'PYEOF'
+import re, sys
 t = open(sys.argv[1], encoding="utf-8").read()
 for k, v in zip(("__PROJECT__", "__SESSION_ID__", "__RAW__", "__READ__",
                  "__DATE__", "__LANGUAGE__"), sys.argv[2:8]):
     t = t.replace(k, v)
+# the personal data rule is there only when [privacy] masks
+keep = sys.argv[8] == "yes"
+t = re.sub(r"<<PRIVACY\n(.*?)PRIVACY>>\n",
+           lambda m: m.group(1) if keep else "", t, flags=re.S)
 sys.stdout.write(t)
 PYEOF
 )"
@@ -341,6 +345,18 @@ leave no out of schema path. Every other rule still applies."
       break
     fi
     CONSEC_ERR=0
+
+    # The prompt tells the worker to mask personal data; this makes it so
+    # whatever the model did, before anything is verified or committed.
+    # The log gets counts and paths only, never a value. A masking failure
+    # rolls the unit back like a failed worker: committing pages that were
+    # meant to be masked and are not is the one outcome this step exists
+    # to prevent.
+    if ! python3 "$SCRIPT_DIR/privacy.py" fix --changed >> "$LOG" 2>&1; then
+      log "personal data masking failed: $PROJ/$SID, rolled back, retries tomorrow"
+      rollback_unit
+      break
+    fi
 
     VREASON="$(python3 "$SCRIPT_DIR/ingest-verify.py" "$PROJ" "$SID" 2>&1)"
     VEXIT=$?

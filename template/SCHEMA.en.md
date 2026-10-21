@@ -116,6 +116,19 @@ included. No other frontmatter shape belongs in a vault page. In particular
 the `name` / `description` / `metadata` shape belongs to an agent's own memory
 files and must not leak in here.
 
+### Personal data rule
+
+Pages leave the vault (git remotes, MCP clients), so nobody's personal data
+is written in clear. E-mail addresses keep their first character and domain
+(`j•••@acme.com`); phone numbers, national id and tax numbers keep their last
+two digits (`+90••••••••67`). Mask with `•`, never `*`: two asterisks on one
+line are markdown emphasis. Role and test addresses (`support@`, `*.test`)
+stay. With `[privacy] mask = yes` the ingest enforces these on every page it
+commits and the MCP server on every page it returns. Write here what a
+script cannot decide: whose names to shorten to initials, which accounts or
+numbers stay in clear, and which tag marks pages a restricted MCP profile
+hides (`security`, for example).
+
 ### Enum rule, the lists are closed
 
 The value lists for `status` and `state` are closed. Inventing a new value is

@@ -58,6 +58,7 @@ python3 -m py_compile scripts/*.py
 for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do zsh -n "$f"; done
 python3 scripts/config.py --check      # against a scratch config.ini
 python3 tests/capture-continuation.py  # any OS, scratch only
+python3 tests/privacy.py               # any OS, scratch only
 zsh tests/sync-e2e.sh                  # Linux, needs rclone; scratch only
 ```
 

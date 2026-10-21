@@ -17,6 +17,24 @@ Register once, then every session of that agent can search the vault:
     command = "python3"
     args = ["<repo>/scripts/a5n-mcp.py"]
 
+    # a client that should see less, with an [mcp:<name>] section:
+    python3 <repo>/scripts/a5n-mcp.py --profile <name>
+
+Personal data is masked on the way out when [privacy] mask = yes, with the
+same rules the ingest applies to its pages (scripts/privacy.py). The
+ingest already wrote its pages masked; this also covers pages written by
+hand or in an interactive session.
+
+A profile hides pages from one client: every page whose frontmatter tags
+meet hide_tags, every page of a hide_projects namespace, and every line of
+the remaining pages that names a hidden page (an index entry, a wikilink,
+a log line). Without that last step an index line would hand out the very
+summary the page was hidden for. The filtering happens here, on the
+machine, because asking the client's model to skip pages it can read is no
+separation at all. It separates only what goes through this server: a
+client that can also read the vault's files directly (a shell, a file
+tool) needs that access taken away on its own side.
+
 Implementation notes. Standard library only, like the rest of A5N: the MCP
 stdio transport is newline delimited JSON-RPC 2.0, which needs no SDK.
 stdout carries protocol messages and nothing else; diagnostics go to
@@ -36,7 +54,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import load, ConfigError  # noqa: E402
+from config import load, mcp_profile, ConfigError  # noqa: E402
+import privacy  # noqa: E402
 
 PROTOCOL_VERSION = "2025-06-18"
 SKIP_DIRS = {".git", ".obsidian", ".a5n-logs", "raw", ".claude", "node_modules"}
@@ -123,7 +142,54 @@ def read_text(path):
         return f.read()
 
 
+class View:
+    """What this client may see: the privacy policy plus the profile's
+    hidden pages. Rebuilt per tool call, because the ingest adds pages
+    while a long agent session keeps the server running."""
+
+    def __init__(self, vault, pol, prof):
+        self.pol = pol
+        self.hidden = set()
+        self.hidden_ns = set(prof["hide_projects"]) if prof else set()
+        tokens = set()
+        if prof and (prof["hide_tags"] or prof["hide_projects"]):
+            for rel, ap in iter_pages(vault):
+                ns = rel.split("/", 1)[0] if "/" in rel else ""
+                if ns in self.hidden_ns or (
+                        prof["hide_tags"]
+                        and page_tags(read_head(ap)) & prof["hide_tags"]):
+                    self.hidden.add(rel)
+                    base = os.path.basename(rel)[:-3]
+                    tokens.add(base)
+                    # log lines name a source page by its slug, without
+                    # the date prefix its file name carries
+                    m = SOURCE_NAME_RX.match(base)
+                    if m and len(m.group(1)) >= 12:
+                        tokens.add(m.group(1))
+        self.tokens = tokens
+
+    def visible(self, rel):
+        return rel not in self.hidden
+
+    def render(self, text):
+        """Page text as this client receives it."""
+        if self.tokens:
+            kept = []
+            for line in text.split("\n"):
+                if self.tokens.isdisjoint(WORD_RX.findall(line)):
+                    kept.append(line)
+            text = "\n".join(kept)
+        if self.pol["enabled"]:
+            text = privacy.mask(text, self.pol)[0]
+        return text
+
+
 FM_RX = re.compile(r"^---\n(.*?)\n---", re.S)
+TAGS_INLINE_RX = re.compile(r"^tags:\s*\[(.*?)\]", re.M)
+TAGS_BLOCK_RX = re.compile(r"^tags:\s*\n((?:[ \t]*-[^\n]*\n?)+)", re.M)
+SOURCE_NAME_RX = re.compile(r"^\d{4}-\d{2}-\d{2}-(.+)$")
+# a page name as it shows up in a line: kebab case, any letters
+WORD_RX = re.compile(r"[\w][\w\-]*[\w]")
 DATE_RX = re.compile(r"^date:\s*(\d{4}-\d{2}-\d{2})", re.M)
 TITLE_RX = re.compile(r"^title:\s*(.+)$", re.M)
 STATUS_RX = re.compile(r"^status:\s*(\S+)", re.M)
@@ -143,6 +209,27 @@ def page_meta(text):
     )
 
 
+def read_head(path, size=4096):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read(size)
+
+
+def page_tags(text):
+    """Lower cased frontmatter tags, inline [a, b] or a block list."""
+    m = FM_RX.match(text)
+    if not m:
+        return set()
+    fm = m.group(1) + "\n"
+    found = TAGS_INLINE_RX.search(fm)
+    if found:
+        items = found.group(1).split(",")
+    else:
+        block = TAGS_BLOCK_RX.search(fm)
+        items = [ln.strip()[1:] for ln in block.group(1).splitlines()
+                 if ln.strip().startswith("-")] if block else []
+    return {i.strip().strip("'\"").lower() for i in items if i.strip()}
+
+
 def recency_bonus(date_str, today):
     """0..3, newer pages score a little higher on equal term hits."""
     try:
@@ -158,7 +245,7 @@ def recency_bonus(date_str, today):
     return 0
 
 
-def do_search(vault, query, project, limit):
+def do_search(vault, view, query, project, limit):
     # project is an MCP argument, which makes it attacker adjacent: a
     # prompt injected caller chooses it freely, and os.path.join with an
     # absolute or ../ value would walk right out of the vault. Only a bare
@@ -166,7 +253,8 @@ def do_search(vault, query, project, limit):
     if project:
         if project != os.path.basename(project) or project.startswith("."):
             return f"project must be a bare namespace name, got: {project}"
-        if not os.path.isdir(os.path.join(vault, project)):
+        if (not os.path.isdir(os.path.join(vault, project))
+                or project in view.hidden_ns):
             return f"no such namespace in the vault: {project}"
     terms = [t for t in re.split(r"\W+", query.lower()) if len(t) >= 2]
     if not terms:
@@ -175,7 +263,9 @@ def do_search(vault, query, project, limit):
     today = datetime.date.today()
     scored = []
     for rel, ap in iter_pages(vault, project):
-        text = read_text(ap)
+        if not view.visible(rel):
+            continue
+        text = view.render(read_text(ap))
         low = text.lower()
         counts = [low.count(t) for t in terms]
         if not any(counts):
@@ -210,7 +300,7 @@ def do_search(vault, query, project, limit):
     return "\n".join(out)
 
 
-def do_page(vault, path):
+def do_page(vault, view, path):
     if not path or path.startswith(("/", "~")) or ".." in path.split("/"):
         return None, "path must be vault relative, without .. segments"
     if not path.endswith(".md"):
@@ -223,18 +313,22 @@ def do_page(vault, path):
         return None, "path resolves outside the vault"
     if not os.path.isfile(ap):
         return None, f"no such page: {path}"
-    text = read_text(ap)
+    rel = os.path.relpath(ap, os.path.realpath(vault))
+    if not view.visible(rel):
+        return None, f"not available to this client: {path}"
+    text = view.render(read_text(ap))
     if len(text) > PAGE_CAP:
         text = text[:PAGE_CAP] + f"\n\n[truncated at {PAGE_CAP // 1024} KB]"
     return text, None
 
 
-def do_overview(vault):
+def do_overview(vault, view):
     out = []
     namespaces = []
     for entry in sorted(os.listdir(vault)):
         base = os.path.join(vault, entry)
-        if os.path.isdir(base) and os.path.isdir(os.path.join(base, "sources")):
+        if (os.path.isdir(base) and os.path.isdir(os.path.join(base, "sources"))
+                and entry not in view.hidden_ns):
             namespaces.append(entry)
     out.append(f"Namespaces ({len(namespaces)}):")
     for ns in namespaces:
@@ -243,20 +337,22 @@ def do_overview(vault):
                     "bugs", "syntheses"):
             d = os.path.join(vault, ns, cat)
             if os.path.isdir(d):
-                n = sum(1 for f in os.listdir(d) if f.endswith(".md"))
+                n = sum(1 for f in os.listdir(d) if f.endswith(".md")
+                        and view.visible(f"{ns}/{cat}/{f}"))
                 if n:
                     counts.append(f"{cat.split('/')[-1]} {n}")
         out.append(f"- {ns}: " + (", ".join(counts) if counts else "empty"))
 
     pat_dir = os.path.join(vault, "patterns")
-    pats = sorted(f for f in os.listdir(pat_dir) if f.endswith(".md")) \
+    pats = sorted(f for f in os.listdir(pat_dir) if f.endswith(".md")
+                  and view.visible(f"patterns/{f}")) \
         if os.path.isdir(pat_dir) else []
     out.append(f"\nCross project patterns ({len(pats)}):")
     out.extend(f"- patterns/{p}" for p in pats) if pats else out.append("(none yet)")
 
     idx = os.path.join(vault, "index.md")
     if os.path.isfile(idx):
-        out.append("\nRoot index.md:\n" + read_text(idx)[:4000])
+        out.append("\nRoot index.md:\n" + view.render(read_text(idx))[:4000])
     return "\n".join(out)
 
 
@@ -264,7 +360,7 @@ def tool_result(text, is_error=False):
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
-def handle(vault, method, params):
+def handle(vault, pol, prof, method, params):
     if method == "initialize":
         return {
             "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
@@ -278,26 +374,40 @@ def handle(vault, method, params):
     if method == "tools/call":
         name = params.get("name")
         args = params.get("arguments") or {}
+        view = View(vault, pol, prof)
         if name == "vault_overview":
-            return tool_result(do_overview(vault))
+            return tool_result(do_overview(vault, view))
         if name == "vault_search":
             return tool_result(do_search(
-                vault, args.get("query", ""), args.get("project", ""),
+                vault, view, args.get("query", ""), args.get("project", ""),
                 args.get("limit", 10)))
         if name == "vault_page":
-            text, err = do_page(vault, args.get("path", ""))
+            text, err = do_page(vault, view, args.get("path", ""))
             return tool_result(err, True) if err else tool_result(text)
         return tool_result(f"unknown tool: {name}", True)
     return None  # unknown method
 
 
-def main():
+def main(argv):
+    prof = None
     try:
-        vault = load()["vault"]["path"]
+        cfg = load()
+        vault = cfg["vault"]["path"]
+        pol = privacy.policy(cfg)
+        if argv[1:2] == ["--profile"]:
+            if len(argv) < 3:
+                raise ConfigError("--profile needs a name")
+            prof = mcp_profile(cfg, argv[2])
+        elif argv[1:]:
+            raise ConfigError(f"unknown arguments: {' '.join(argv[1:])}")
     except ConfigError as exc:
+        # refuse to serve: a client registered for a profile that does not
+        # resolve must get nothing, not everything
         log(f"config error: {exc}")
         return 1
-    log(f"serving vault {vault}")
+    log(f"serving vault {vault}"
+        + (f", profile {prof['name']}" if prof else "")
+        + (", personal data masked" if pol["enabled"] else ""))
 
     for line in sys.stdin:
         line = line.strip()
@@ -313,7 +423,7 @@ def main():
         if msg_id is None:
             continue  # notification: never answered
         try:
-            result = handle(vault, method, msg.get("params") or {})
+            result = handle(vault, pol, prof, method, msg.get("params") or {})
         except Exception as exc:  # a tool bug must not kill the transport
             log(f"error in {method}: {exc}")
             reply = {"jsonrpc": "2.0", "id": msg_id,
@@ -331,4 +441,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))
