@@ -239,6 +239,23 @@ The server is read only and never opens `raw/`. It does its own ranking, so
 a query adds no model cost. `setup.sh` prints these commands with the real
 paths filled in.
 
+Personal data stays out of what it returns. With `[privacy] mask = yes`, the
+default, e-mail addresses, phone numbers, national id and tax numbers are
+masked in every page on the way out (`j•••@acme.com`, `+90••••••••67`), and
+the daily ingest masks a worker's pages the same way before it commits
+them. Role and test addresses stay readable, and `keep_emails`,
+`keep_domains` and `keep_phones` list what else should. Names are left to
+the schema: no pattern tells a person from a product.
+
+A client that should see less gets a profile. A `[mcp:assistant]` section
+with `hide_tags = security` and a client started with
+`a5n-mcp.py --profile assistant` never sees a page tagged `security`, nor
+any line of another page that names one, so an index entry cannot give the
+hidden page away. The filter runs in the server, on your machine. It covers
+only what goes through the server: an agent that also has a shell or file
+tools on the same machine can still read the vault files, so run such an
+agent in a sandbox that does not mount the vault.
+
 Registering the server makes the vault reachable. It does not make agents
 look, because an available tool is not a used tool: without a standing
 instruction, agents answer history questions from guesswork instead of the

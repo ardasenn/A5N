@@ -243,6 +243,23 @@ Server salt okunurdur ve `raw/` altını asla açmaz. Sıralamayı kendi yaptı�
 için bir sorgunun ekstra model maliyeti yoktur. `setup.sh` bu komutları
 gerçek yollarla doldurup basar.
 
+Kişisel veri dönen cevaba girmez. Varsayılan `[privacy] mask = yes` ile
+e-posta adresleri, telefon numaraları, kimlik ve vergi numaraları her sayfada
+dışarı verilirken maskelenir (`j•••@acme.com`, `+90••••••••67`); günlük
+ingest de işçinin sayfalarını commit etmeden önce aynı şekilde maskeler. Rol
+ve test adresleri okunur kalır, başka neyin kalacağını `keep_emails`,
+`keep_domains` ve `keep_phones` söyler. Adlar şemaya bırakılır: hiçbir desen
+bir kişiyi bir üründen ayıramaz.
+
+Daha azını görmesi gereken istemciye profil verilir. `hide_tags = security`
+içeren bir `[mcp:assistant]` bölümü ve `a5n-mcp.py --profile assistant` ile
+başlatılan bir istemci, `security` etiketli hiçbir sayfayı ve başka
+sayfalarda onu anan hiçbir satırı görmez, yani bir index girdisi gizli
+sayfayı ele veremez. Süzme server'da, senin makinende yapılır. Yalnızca
+server'dan geçeni kapsar: aynı makinede kabuğu ya da dosya araçları olan bir
+ajan vault dosyalarını yine okuyabilir, böyle bir ajanı vault'u bağlamayan
+bir sandbox'ta çalıştır.
+
 Server'ı kaydetmek vault'u erişilir yapar. Ajanların bakmasını sağlamaz,
 çünkü erişilebilir araç kullanılan araç değildir: kalıcı bir talimat yoksa
 ajan geçmiş sorularını arşive bakmak yerine tahminle cevaplar. Her projenin

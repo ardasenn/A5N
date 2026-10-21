@@ -116,6 +116,19 @@ Başka bir frontmatter şeması vault sayfasında kullanılmaz. Özellikle
 `name` / `description` / `metadata` biçimi ajanın kendi hafıza dosyalarına
 aittir, buraya sızmamalıdır.
 
+### Kişisel veri kuralı
+
+Sayfalar vault'tan çıkar (git remote'ları, MCP istemcileri), bu yüzden
+kimsenin kişisel verisi açık yazılmaz. E-posta ilk harfini ve alan adını
+korur (`j•••@acme.com`); telefon, kimlik ve vergi numarası son iki hanesini
+korur (`+90••••••••67`). Maske `•` ile yapılır, `*` ile değil: aynı
+satırdaki iki yıldız markdown'da vurgudur. Rol ve test adresleri
+(`support@`, `*.test`) kalır. `[privacy] mask = yes` ile ingest bunu commit
+ettiği her sayfada, MCP server da döndürdüğü her sayfada uygular. Script'in
+karar veremediğini buraya yaz: kimin adı baş harfe iner, hangi hesap ya da
+numara açık kalır, kısıtlı bir MCP profilinin gizlediği sayfaları hangi
+etiket işaretler (örneğin `security`).
+
 ### Enum kuralı, listeler kapalı
 
 `status` ve `state` alanlarının değer listeleri kapalıdır. Yeni değer icat
