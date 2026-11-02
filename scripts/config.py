@@ -247,6 +247,24 @@ def resolve_runner_bin(cfg):
     return found
 
 
+def _match_folders(section, raw):
+    """match_folders as absolute paths. ~ expands on the machine reading the
+    file, which is what lets one line serve machines with different user
+    names."""
+    out = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        path = os.path.expanduser(item).rstrip("/")
+        if not os.path.isabs(path):
+            raise ConfigError(
+                f"[{section}] match_folders has '{item}', a folder must "
+                f"start with ~ or /.")
+        out.append(path)
+    return out
+
+
 def _projects(parser):
     out = []
     for section in parser.sections():
@@ -256,15 +274,33 @@ def _projects(parser):
         if not name:
             raise ConfigError(f"section [{section}] has no project name")
         values = parser[section]
-        match = values.get("match", "").strip() or name
+        folders = _match_folders(section, values.get("match_folders", ""))
+        match = values.get("match", "").strip()
+        if folders and match:
+            raise ConfigError(
+                f"[{section}] sets both match and match_folders. A session "
+                f"could then land here for two different reasons, keep one.")
+        # No default when folders are named: the section name would become a
+        # substring and pull in any folder that happens to contain it.
+        if not folders:
+            match = match or name
         out.append(
             {
                 "name": name,
                 "repo": os.path.expanduser(values.get("repo", "").strip()),
                 "match": match,
+                "match_folders": folders,
                 "watermark": values.get("watermark", "").strip(),
             }
         )
+    claimed = {}
+    for p in out:
+        for folder in p["match_folders"]:
+            if folder in claimed:
+                raise ConfigError(
+                    f"{folder} is in match_folders of both {claimed[folder]} "
+                    f"and {p['name']}. A session can only belong to one.")
+            claimed[folder] = p["name"]
     return out
 
 
@@ -397,7 +433,10 @@ def main(argv):
             return 1
     elif mode == "--projects":
         for p in cfg["_projects"]:
-            print(f"{p['name']}\t{p['match']}\t{p['watermark']}\t{p['repo']}")
+            # Never an empty field: tab is whitespace to read's IFS, so
+            # setup.sh would collapse it and shift the columns after it.
+            how = p["match"] or ", ".join(p["match_folders"])
+            print(f"{p['name']}\t{how}\t{p['watermark']}\t{p['repo']}")
     elif mode == "--check":
         if not cfg["_projects"]:
             sys.stderr.write(
@@ -442,7 +481,9 @@ def main(argv):
                   f"The runner CLI/model moved to [runner], run_timeout "
                   f"became limits.unit_timeout.")
         for p in cfg["_projects"]:
-            print(f"project: {p['name']} (match '{p['match']}', since {p['watermark']})")
+            how = (f"folders {', '.join(p['match_folders'])}"
+                   if p["match_folders"] else f"match '{p['match']}'")
+            print(f"project: {p['name']} ({how}, since {p['watermark']})")
     else:
         sys.exit(__doc__)
     return 0

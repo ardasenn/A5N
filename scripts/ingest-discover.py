@@ -34,7 +34,8 @@ Usage:
 
 capture scans both transcript sources from config.ini:
   * Claude Code: folders under agents.claude_projects whose name contains a
-    project's match value; every *.jsonl at the folder root is a candidate.
+    project's match value, or that are exactly one of its match_folders;
+    every *.jsonl at the folder root is a candidate.
     Files under subfolders (subagents/, tool-results/) are not sessions.
   * Codex: rollout-*.jsonl anywhere under agents.codex_sessions. The folder
     name says nothing there, so the project is decided by the session's own
@@ -240,11 +241,28 @@ def session_date(path):
     return datetime.date.fromtimestamp(os.path.getmtime(path)).isoformat()
 
 
+def in_match_folders(project, text):
+    """True if text is one of the project's match_folders, as a Codex cwd or
+    as the name Claude Code gives that folder's project folder. Equality, not
+    substring: the home folder's name starts every other folder's name, so a
+    substring would claim all of them."""
+    text = text.rstrip("/")
+    return any(text == f or text == re.sub(r"[^A-Za-z0-9-]", "-", f)
+               for f in project["match_folders"])
+
+
 def match_one(projects, text, what):
     """Match a folder name or cwd to a project. Two matches is a config bug
     that must stop the run, or one project's sessions leak into another."""
+    # Before the substrings: a user name can contain a project's match value,
+    # and that would otherwise file these sessions under that project.
+    # config.py already refused a folder named by two projects.
+    for p in projects:
+        if in_match_folders(p, text):
+            return p
     low = text.lower()
-    hits = [p for p in projects if p["match"].lower() in low]
+    hits = [p for p in projects
+            if not p["match_folders"] and p["match"].lower() in low]
     if len(hits) > 1:
         sys.exit(f"error: {what} '{text}' matches more than one project: "
                  f"{[p['name'] for p in hits]}. Make the match values in "

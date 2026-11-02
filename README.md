@@ -113,6 +113,20 @@ name and against the Codex session working directory, so one value usually
 covers both, and git worktrees match automatically because their paths contain
 it too.
 
+Conversations you start without picking a project land in a general folder such
+as your home folder or your desktop, and `match` cannot select those because the
+home folder's name starts every other folder's name. Use `match_folders` instead
+of `match` to name them exactly, subfolders not included:
+
+```ini
+[project:general]
+match_folders = ~, ~/Desktop
+watermark = 2026-01-01
+```
+
+`~` expands on the machine reading the file, so the same line works on machines
+with different user names, and a folder that does not exist there does no harm.
+
 `watermark` is a fixed date, not a rolling window. Sessions older than it are
 ignored. Set it to today to start clean, or to an older date to pull in
 history. Because it is fixed rather than rolling, a machine that was off for a

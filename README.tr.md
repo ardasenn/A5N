@@ -116,6 +116,20 @@ oturumunun çalışma dizinine bakılır, dolayısıyla tek değer genelde ikisi
 kapsar. Git worktree'leri de otomatik eşleşir, çünkü yolları aynı alt dizeyi
 içerir.
 
+Proje seçmeden başlattığın konuşmalar ev klasörün ya da masaüstün gibi genel bir
+klasöre düşer. `match` bunları seçemez, çünkü ev klasörünün adı diğer bütün
+klasörlerin adının başında geçer. Bunları tam adıyla belirtmek için `match`
+yerine `match_folders` kullan, alt klasörler dahil değildir:
+
+```ini
+[project:genel]
+match_folders = ~, ~/Desktop
+watermark = 2026-01-01
+```
+
+`~` dosyayı okuyan makinede açılır, yani aynı satır kullanıcı adı farklı
+makinelerde de çalışır ve orada olmayan bir klasör sorun çıkarmaz.
+
 `watermark` sabit bir tarihtir, kayan bir pencere değil. Ondan eski oturumlar
 yok sayılır. Temiz başlamak için bugünü, geçmişi çekmek için daha eski bir
 tarihi yaz. Sabit olduğu için, bir hafta kapalı kalan makine geri döndüğünde
